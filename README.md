@@ -165,7 +165,9 @@ EPERM: operation not permitted, rename '...\dsh-chat-preset_tmp_15912_4' -> '...
 (Get-Item 'C:\Users\<you>\.dsh\profiles\<profile>\node_modules\<pkg>' -Force).Delete()
 ```
 
-> ⚠️ 别用 `rm -rf` 删这个条目。它是指向源码目录的 reparse point，`rm -rf` 会**跟进目标**把仓库删掉。
+> 用 `.Delete()` 而不是 `rm -rf`：前者对 reparse point 语义明确（只摘链）。实测 Node 的
+> `fs.rmSync(recursive)` 和 Git Bash 的 `rm -rf` 在这台机器上都不会跟进目标，但不同 MSYS /
+> 文件系统驱动版本行为不一致，没有必要冒险。
 
 然后正常 `dsh plugin --profile <p> add <spec>` 即可。
 
