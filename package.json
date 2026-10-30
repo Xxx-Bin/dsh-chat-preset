@@ -1,10 +1,15 @@
 {
   "name": "dsh-chat-preset",
   "version": "1.1.1",
-  "private": true,
+  "private": false,
   "description": "ChatOnly 预设与其请求形态：拦截运行时上下文快照、剥离全局工具、系统提示词改为读文件热更新。",
-  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "agent-preset", "chatonly", "system-prompt", "runtime-context"],
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "cordis", "agent-preset", "chatonly", "system-prompt", "runtime-context"],
   "license": "MIT",
+  "engines": { "node": ">=18" },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Xxx-Bin/dsh-chat-preset.git"
