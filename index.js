@@ -71,7 +71,7 @@
  * emits `{ tools }` only when the list is non-empty (`dsh-agent-loop`:1217-1220),
  * so clearing `assembly.tools` means the model is offered no tools at all.
  *
- * @module @local/dsh-chat-preset
+ * @module dsh-chat-preset
  */
 
 // --- self-diagnostics: one JSON line per install/miss into ~/.dsh-filter-rtc-debug.log ---

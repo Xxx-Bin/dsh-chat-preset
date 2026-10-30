@@ -22,7 +22,7 @@
 # exceeds the model context window fails instead of shrinking.
 - insert:
     - id: chatonly-context-policy
-      name: '@local/dsh-chat-preset'
+      name: 'dsh-chat-preset'
       config:
         role: 'policy'
         presetId: 'chatonly'
@@ -38,7 +38,7 @@
         order: 5
         plugins:
           - id: prompt
-            name: '@local/dsh-chat-preset'
+            name: 'dsh-chat-preset'
             config:
               role: 'section'
               file: '~/.dsh/chatonly-system-prompt.md'
