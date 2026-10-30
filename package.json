@@ -5,6 +5,12 @@
   "description": "ChatOnly 预设与其请求形态：拦截运行时上下文快照、剥离全局工具、系统提示词改为读文件热更新。",
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "agent-preset", "chatonly", "system-prompt", "runtime-context"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Xxx-Bin/dsh-chat-preset.git"
+  },
+  "homepage": "https://github.com/Xxx-Bin/dsh-chat-preset#readme",
+  "bugs": "https://github.com/Xxx-Bin/dsh-chat-preset/issues",
   "type": "module",
   "main": "index.js",
   "files": ["index.js", "cordis.patch.yml"],

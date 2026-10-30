@@ -21,6 +21,39 @@ ChatOnly 预设 + 它该有的请求形态，一个包管完。
 | `policy`（默认） | 全局 | 拦截上下文、剥离工具、注册 `/chatprompt` |
 | `section` | 预设的 `plugins` 里 | 占 persona 槽位，从文件读系统提示词 |
 
+## 安装
+
+dsh 把「把一个包装进 profile」做成了 **pnpm 转发 + 事后对账**，所以不用手改 `bundles`：
+
+```bash
+# 直接从 GitHub 装
+dsh plugin --profile desktop add github:Xxx-Bin/dsh-chat-preset
+
+# 或先克隆再 link（改代码即时生效，调试用这个）
+git clone git@github.com:Xxx-Bin/dsh-chat-preset.git
+dsh plugin --profile desktop add link:/absolute/path/to/dsh-chat-preset
+```
+
+`dsh plugin <profile> add` 会在 profile 目录里跑 `pnpm add`，然后对账 `dsh.profile.bundles`：
+凡是**已安装的依赖**且 **`package.json` 声明了 `dsh.bundle`** 的，自动追加进 layer stack。
+本包声明了 `dsh.bundle.patch`，所以加完依赖它自己就进 bundles 了。
+
+重启 dsh，在预设选择里勾 **ChatOnly**。
+
+<details>
+<summary>手动安装（不依赖 dsh CLI）</summary>
+
+1. 在 `~/.dsh/profiles/<profile>/package.json` 的 `dependencies` 里加
+   `"@local/dsh-chat-preset": "link:/absolute/path/to/dsh-chat-preset"`
+2. 把它加进同文件的 `dsh.profile.bundles` 数组
+3. 在该 profile 目录跑 `pnpm install`
+4. 重启 dsh
+
+</details>
+
+装完先确认它真的加载了：看 `~/.dsh-filter-rtc-debug.log`，应该出现
+`{"evt":"applied",...}` 和 `{"evt":"prompt-section",...}` 各一行。
+
 ## 配置
 
 ```yaml
