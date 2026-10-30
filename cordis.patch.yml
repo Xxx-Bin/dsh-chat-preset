@@ -1,0 +1,44 @@
+# ChatOnly in one package: the preset row, the context policy, and the system
+# prompt that belongs to it.
+#
+# Row 1 (`chatonly-context-policy`, mounted globally) loads THIS package's
+# index.js with role `policy`:
+#   - shadows the required `working-directory:current` contribution, so the
+#     runtime-context snapshot never reaches the request or the session log;
+#   - clears `assembly.tools`, because global tool providers are collected for
+#     every preset and a preset row cannot remove them;
+#   - registers `/chatprompt`, the composer-side editor for the prompt file.
+#
+# Row 2 (`preset-chat`) defines the preset. Its `plugins` list mounts THIS
+# package again with role `section`, which owns the `deployment:persona-prefix`
+# slot (complete: true) and reads its text from
+# `~/.dsh/chatonly-system-prompt.md` on every assembly — edit the file (or send
+# `/chatprompt …`) and the next message uses it. No restart.
+#
+# Do NOT add a `dsh-persona` row next to it: one section name may be registered
+# once per scope.
+#
+# No compaction: no auto-condensation, no /compact — a conversation that
+# exceeds the model context window fails instead of shrinking.
+- insert:
+    - id: chatonly-context-policy
+      name: '@local/dsh-chat-preset'
+      config:
+        role: 'policy'
+        presetId: 'chatonly'
+        contextName: 'working-directory:current'
+        stripTools: true
+        file: '~/.dsh/chatonly-system-prompt.md'
+    - id: preset-chat
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: chatonly
+        name: ChatOnly
+        description: '纯对话：无工具无技能；系统提示词来自 ~/.dsh/chatonly-system-prompt.md（留空则仅发送用户输入）'
+        order: 5
+        plugins:
+          - id: prompt
+            name: '@local/dsh-chat-preset'
+            config:
+              role: 'section'
+              file: '~/.dsh/chatonly-system-prompt.md'
