@@ -146,6 +146,29 @@ dsh plugin --profile desktop add link:/absolute/path/to/dsh-chat-preset
 
 会话侧要看**解压后**的日志（会话文件是 11 帧拼接的 zstd，普通解压只读得到 header）。
 
+### Windows：`ERR_PNPM_EPERM ... rename '<name>_tmp_N_M' -> '<name>'`
+
+在同一个 profile 上**反复切换同一个包的数据源**（`link:` ↔ `github:` ↔ 版本号）时会撞到：
+
+```
+[ERR_PNPM_EPERM] [importPackage ...node_modules\dsh-chat-preset]
+EPERM: operation not permitted, rename '...\dsh-chat-preset_tmp_15912_4' -> '...\dsh-chat-preset'
+```
+
+原因是 Windows 的 `MoveFileEx` **不能** rename 覆盖一个已存在的目录（空目录也不行），而 POSIX 允许——
+所以这个错几乎只在 Windows 上出现。pnpm 的 import 是「临时目录 → rename」，目标还在就卡死。
+
+绕过：**先把目标条目摘掉，再执行 add。**
+
+```powershell
+# 摘链。只删链接本身，不会动到链接指向的仓库
+(Get-Item 'C:\Users\<you>\.dsh\profiles\<profile>\node_modules\<pkg>' -Force).Delete()
+```
+
+> ⚠️ 别用 `rm -rf` 删这个条目。它是指向源码目录的 reparse point，`rm -rf` 会**跟进目标**把仓库删掉。
+
+然后正常 `dsh plugin --profile <p> add <spec>` 即可。
+
 ## 测试
 
 ```bash
