@@ -270,9 +270,9 @@ npm version patch            # 或 minor / major，同时打 tag（如 v1.2.0）
 git push --follow-tags
 ```
 
-工作流依次执行：测试 → 校验 tag 与 `package.json` 版本一致 → `npm publish --access public`。版本不一致或测试失败时不会发布。
+工作流依次执行：升级 npm（OIDC 需 ≥ 11.5.1）→ 测试 → 校验 tag 与 `package.json` 版本一致 → `npm publish --access public --provenance`。
 
-前置条件：仓库 Secrets 中存在 `NPM_TOKEN`，且必须是 npm 的 **Automation** 类型令牌。Publish 类型令牌仍会要求 OTP，在 CI 中必然失败（EOTP）。
+发布使用 npm **Trusted Publishing**（OIDC），不需要任何仓库 Secret。npm 侧需为该包登记 publisher：GitHub 仓库 `Xxx-Bin/dsh-chat-preset`、workflow 文件名 `publish.yml`；两者之一对不上，认证即失败。工作流内 `NODE_AUTH_TOKEN` 被显式置空——`actions/setup-node` 会注入占位值，非空时会压过 OIDC。
 
 > 本机 `~/.npmrc` 若将 registry 指向镜像（如 `registry.npmmirror.com`），手动发布需显式指定 `--registry https://registry.npmjs.org`；工作流的 `setup-node` 已固定为官方源。
 

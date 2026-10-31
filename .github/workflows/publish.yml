@@ -1,9 +1,10 @@
 name: Publish
 
+# 发布走 npm Trusted Publishing（OIDC），不依赖 NPM_TOKEN。
+# npm 侧需在该包设置中登记 publisher：GitHub 仓库 Xxx-Bin/dsh-chat-preset，
+# workflow 文件名 publish.yml。仓库或文件名对不上时认证会失败。
+#
 # 推 tag 即发布：git tag v1.2.0 && git push origin v1.2.0
-# 前置条件：仓库 Settings → Secrets and variables → Actions 里存在 NPM_TOKEN，
-#          且该 token 是 npm 的 Automation 类型（Automation token 不受账号 2FA 拦截；
-#          Publish token 仍会要求 OTP，在 CI 里必然失败）。
 
 on:
   push:
@@ -17,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write   # OIDC 身份令牌，Trusted Publishing 的前提
 
 jobs:
   publish:
@@ -26,13 +28,20 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org   # 覆盖本机/环境可能指向的镜像源
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
 
+      # Node 22 自带 npm 10.x，Trusted Publishing 需要 ≥ 11.5.1
+      - name: Upgrade npm for OIDC
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # 本包无第三方依赖、无 lockfile、无构建步骤，故跳过 npm ci / npm run build
       - name: Run tests
         run: node test.mjs
 
-      # tag 与 package.json 版本不一致时直接失败，避免把 v1.2.0 发成 1.2.1
+      # tag 与 package.json 版本不一致时直接失败，避免 v1.2.0 发成别的版本
       - name: Check tag matches package.json
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -44,26 +53,13 @@ jobs:
             exit 1
           fi
 
-      - name: Verify token
-        run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::NPM_TOKEN 为空：仓库 Secrets 中不存在该键，或未在 Actions 页面配置"
-            exit 1
-          fi
-          echo "token 长度: ${#NODE_AUTH_TOKEN}"
-          npm whoami || {
-            echo "::error::NPM_TOKEN 无效或已过期（npm whoami 失败）"
-            exit 1
-          }
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm publish --dry-run --access public
+            npm publish --dry-run --access public --provenance
           else
-            npm publish --access public
+            npm publish --access public --provenance
           fi
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # 必须显式置空：setup-node 会注入 NODE_AUTH_TOKEN 占位值，非空时会压过 OIDC
+          NODE_AUTH_TOKEN: ""
