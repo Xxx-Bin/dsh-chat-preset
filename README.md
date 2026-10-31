@@ -11,7 +11,7 @@
 dsh 的默认请求对「纯对话」这个场景是过重的。三样东西会同时出现在每一条 ChatOnly 请求里：
 
 1. **运行时上下文快照**——`dsh-working-directory` 把当前工作目录注入成一条 `runtime-context` 用户消息；
-2. **全局工具 schema**——桌面端 bundle 注册的 `acp_*`、`compress`、`search_context`、`working_directory` 等约 10 个工具，对纯对话没有任何意义，却占着 prompt 预算；
+2. **全局工具 schema**——桌面端插件注入的 `acp_*`、`compress`、`search_context`、`working_directory`，对纯对话没有意义，却占着 prompt 预算；
 3. **写死在预设里的系统提示词**——改一次要重启，没法边聊边调。
 
 前两项**都不能在预设行里解决**：
@@ -41,7 +41,10 @@ dsh 的默认请求对「纯对话」这个场景是过重的。三样东西会�
 ## 安装
 
 ```bash
-# 从 GitHub 装
+# 从 npm 装（推荐）
+dsh plugin --profile desktop add dsh-chat-preset
+
+# 或从 GitHub 装
 dsh plugin --profile desktop add github:Xxx-Bin/dsh-chat-preset
 
 # 本地开发：装路径，改代码即时生效
@@ -49,14 +52,16 @@ git clone git@github.com:Xxx-Bin/dsh-chat-preset.git
 dsh plugin --profile desktop add /absolute/path/to/dsh-chat-preset
 ```
 
-`dsh plugin <profile> add` 会在 profile 目录里跑 `pnpm add`，然后对账 `dsh.profile.bundles`：凡是**已安装的依赖**且 **`package.json` 声明了 `dsh.bundle`** 的，自动追加进 layer stack。本包声明了 `dsh.bundle.patch`，所以加完依赖它自己就进 bundles 了。
+`--profile` 后面是 **profile 名**，即 `~/.dsh/profiles/` 下的目录名。桌面端默认叫 `desktop`；不确定就先 `ls ~/.dsh/profiles` 看一眼。
+
+`dsh plugin --profile desktop add` 会在该 profile 目录里跑 `pnpm add`，然后对账 `dsh.profile.bundles`：凡是**已安装的依赖**且 **`package.json` 声明了 `dsh.bundle`** 的，自动追加进 layer stack。本包声明了 `dsh.bundle.patch`，所以加完依赖它自己就进 bundles 了。
 
 **装完必须重启 dsh**——bundles 层只在启动时合成，运行中不监听。重启后在预设选择里勾 **ChatOnly**。
 
 <details>
 <summary>手动安装（不依赖 dsh CLI）</summary>
 
-1. 在 `~/.dsh/profiles/<profile>/package.json` 的 `dependencies` 里加
+1. 在 `~/.dsh/profiles/desktop/package.json` 的 `dependencies` 里加
    `"dsh-chat-preset": "link:/absolute/path/to/dsh-chat-preset"`
 2. 把它加进同文件的 `dsh.profile.bundles` 数组
 3. 在该 profile 目录跑 `pnpm install`
@@ -66,16 +71,16 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-chat-preset
 
 ## 确认生效
 
-装了没反应，先按这三条查，不用猜：
+装了没反应，先按这三条查，不用猜。下面用 `desktop` 举例，换 profile 就改这个名字：
 
 ```bash
-# 1. 依赖和 bundles 里都该有它
-node -e "const p=require('<profile>/package.json');console.log(p.dependencies['dsh-chat-preset'], p.dsh.profile.bundles.includes('dsh-chat-preset'))"
+# 1. 依赖和 bundles 里都该有它（输出形如：^1.1.1 true）
+node -e "const p=require(require('os').homedir()+'/.dsh/profiles/desktop/package.json');console.log(p.dependencies['dsh-chat-preset'], p.dsh.profile.bundles.includes('dsh-chat-preset'))"
 
 # 2. 合成树里应出现两行（policy + section）
-dsh --profile <profile> --dump-config | grep -A2 dsh-chat-preset
+dsh --profile desktop --dump-config | grep -A2 dsh-chat-preset
 
-# 3. 重启 dsh
+# 3. 重启 dsh —— bundles 只在启动时合成，运行中不监听
 ```
 
 第 2 条正确的话会长这样：
@@ -91,9 +96,18 @@ dsh --profile <profile> --dump-config | grep -A2 dsh-chat-preset
 
 ### 系统提示词
 
-- 文件：`~/.dsh/chatonly-system-prompt.md`（空文件 = 不发任何系统消息）
-- 命令：`/chatprompt`（预览）· `/chatprompt show` · `/chatprompt clear` · `/chatprompt 正文…`
-- **文件内容就是全部系统提示词**，不会自动拼 `You are an AI agent…` 之类的框架话
+在对话框里用 `/chatprompt` 就能注入、查看、清空，不用去翻文件：
+
+| 命令 | 作用 |
+|---|---|
+| `/chatprompt 你是一个……` | **注入**——写入文件并立即生效（下一条消息） |
+| `/chatprompt` | **查看**——当前内容预览、字数、文件路径 |
+| `/chatprompt show` | 查看全文 |
+| `/chatprompt clear` | **清空**——之后不再发送任何系统消息 |
+
+内容存在 `~/.dsh/chatonly-system-prompt.md`，命令只是它的读写入口，你也可以直接编辑该文件。空文件 = 不发系统消息。
+
+**文件内容就是全部系统提示词**，不会自动拼 `You are an AI agent…` 之类的框架话。
 
 ### 配置
 
