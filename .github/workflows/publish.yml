@@ -44,6 +44,20 @@ jobs:
             exit 1
           fi
 
+      - name: Verify token
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN 为空：仓库 Secrets 中不存在该键，或未在 Actions 页面配置"
+            exit 1
+          fi
+          echo "token 长度: ${#NODE_AUTH_TOKEN}"
+          npm whoami || {
+            echo "::error::NPM_TOKEN 无效或已过期（npm whoami 失败）"
+            exit 1
+          }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
