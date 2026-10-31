@@ -52,6 +52,8 @@ DSH 默认的最小配置是精简模式。即便在该模式下，请求仍包�
 
 依赖：**dsh**（桌面端或 CLI）、`pnpm` 位于 `PATH`（`dsh plugin add` 内部转发 `pnpm add`）、**Node.js ≥ 18**。
 
+### 桌面端（`desktop`）
+
 ```bash
 # npm
 dsh plugin --profile desktop add dsh-chat-preset
@@ -64,14 +66,20 @@ git clone git@github.com:Xxx-Bin/dsh-chat-preset.git
 dsh plugin --profile desktop add /absolute/path/to/dsh-chat-preset
 ```
 
-`--profile` 为 profile 名，即 `~/.dsh/profiles/` 下的目录名；桌面端默认为 `desktop`。`add` 在该目录执行 `pnpm add`，随后核对 `dsh.profile.bundles`：凡已安装且 `package.json` 声明 `dsh.bundle` 的依赖会被追加进 layer stack。本包声明 `dsh.bundle.patch`，安装后自动登记。
+### dsh web（`web`）
+
+```bash
+dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
+```
+
+`--profile` 为 profile 名，即 `~/.dsh/profiles/` 下的目录名；桌面端默认为 `desktop`，Web 端为 `web`。`add` 在该目录执行 `pnpm add`，随后核对 `dsh.profile.bundles`：凡已安装且 `package.json` 声明 `dsh.bundle` 的依赖会被追加进 layer stack。本包声明 `dsh.bundle.patch`，安装后自动登记。
 
 **安装后须重启 dsh。** bundles 层仅在启动时合成，运行期不监听变更。重启后在预设选择中启用 **ChatOnly**。
 
 <details>
 <summary>手动安装（不依赖 dsh CLI）</summary>
 
-1. 在 `~/.dsh/profiles/desktop/package.json` 的 `dependencies` 中添加 `"dsh-chat-preset": "link:/absolute/path/to/dsh-chat-preset"`
+1. 在 `~/.dsh/profiles/<profile>/package.json` 的 `dependencies` 中添加 `"dsh-chat-preset": "link:/absolute/path/to/dsh-chat-preset"`
 2. 在同一文件的 `dsh.profile.bundles` 数组中添加 `"dsh-chat-preset"`
 3. 在该目录执行 `pnpm install`
 4. 重启 dsh
@@ -193,7 +201,7 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-chat-preset
 
 ```bash
 # 1. 从 profile 移除：dependencies 与 dsh.profile.bundles 各删除一条
-#    ~/.dsh/profiles/desktop/package.json
+#    ~/.dsh/profiles/<profile>/package.json（桌面端为 desktop，Web 端为 web）
 #    随后在该目录执行 pnpm install 并重启 dsh
 
 # 2. 系统提示词文件（用户内容，按需保留）
