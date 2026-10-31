@@ -162,6 +162,8 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-chat-preset
 
 **两处 `file` 必须一致。** 写入与读取路径不同时，`/chatprompt` 会报告保存成功而系统提示词从未生效。
 
+**`toolsStateFile` 不得与 `file` 指向同一路径。** 开关文件按单行关键字解析，读到提示词全文时识别失败并永久回退出厂默认；反向更糟，`/chattools on|off` 会把提示词覆盖成一行 `strip`／`pass`。
+
 **`stripTools` 是出厂默认值，不是总开关。** 状态文件存在时以其为准；设为 `false` 不会禁用 `/chattools`，仅改变未切换时的默认行为。需要彻底禁用抑制行为时应卸载本包。
 
 ## 兼容性与脆弱性
@@ -204,6 +206,12 @@ rm ~/.dsh/chatonly-strip-tools.state
 rm ~/.dsh-filter-rtc-debug.log
 ```
 
+`dsh plugin remove`（或桌面端插件页的卸载）**不会**动上面第 2–4 项。它的流程是：从 `dsh.profile.bundles` 摘除 → 卸载运行期 contribution → `pnpm remove` → 重新解析。插件 API 没有卸载钩子，流程也不扫描插件写过哪些文件，因此这几步只能手动执行。
+
+不清理不算残留故障：卸载会 dispose 全部运行期注册（命令、section、监听器、shadow），行为当场回到默认；上述文件此后无人读取，只是留在主目录。唯一的真实影响是**重装沿用旧开关** —— `chatonly-strip-tools.state` 仍在时 `/chattools` 不回出厂默认，而是上次写入的 `strip`／`pass`；要拿到干净初值，先执行 `/chattools reset`。
+
+Windows 下 `rm` 不可用：PowerShell 用 `Remove-Item`，cmd 用 `del`。
+
 ### 调试日志
 
 `index.js` 向 `~/.dsh-filter-rtc-debug.log` 同步追加 JSON 行，记录每次装配、每次工具剥离、每次模式切换与每次 shadow 注册。日志无大小上限与轮转机制，长期使用会持续增长。
@@ -219,12 +227,19 @@ rm ~/.dsh-filter-rtc-debug.log
 node -e "const os=require('os'),fs=require('fs');const f=os.homedir()+'/.dsh/profiles/desktop/package.json';if(!fs.existsSync(f)){console.log('profile 不存在: '+f);process.exit(0)}const p=JSON.parse(fs.readFileSync(f,'utf8'));console.log('dep    :',p.dependencies?.['dsh-chat-preset']??'<未安装>');const b=p.dsh?.profile?.bundles;console.log('bundles:',Array.isArray(b)?(b.includes('dsh-chat-preset')?'已登记':'未登记'):'<无此字段>')"
 
 # 2. 依赖树中存在该包（应输出 dsh-chat-preset@<版本>）
+
+#    Linux / macOS
 dsh plugin --profile desktop ls | grep dsh-chat-preset
+
+#    Windows（PowerShell，无 grep）
+dsh plugin --profile desktop ls | Select-String dsh-chat-preset
+#    Windows（cmd，无 grep）
+dsh plugin --profile desktop ls | findstr dsh-chat-preset
 
 # 3. 重启 dsh —— bundles 层仅在启动时合成
 ```
 
-前两步仅确认安装状态，第三步之后才涉及生效。
+前两步仅确认安装状态，第三步之后才涉及生效。Windows 用户以 git-bash 执行时可沿用 `grep` 写法。
 
 | 第 1 步输出 | 结论 |
 |---|---|
