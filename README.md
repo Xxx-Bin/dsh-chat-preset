@@ -146,31 +146,6 @@ dsh plugin --profile desktop add link:/absolute/path/to/dsh-chat-preset
 
 会话侧要看**解压后**的日志（会话文件是 11 帧拼接的 zstd，普通解压只读得到 header）。
 
-### Windows：`ERR_PNPM_EPERM ... rename '<name>_tmp_N_M' -> '<name>'`
-
-在同一个 profile 上**反复切换同一个包的数据源**（`link:` ↔ `github:` ↔ 版本号）时会撞到：
-
-```
-[ERR_PNPM_EPERM] [importPackage ...node_modules\dsh-chat-preset]
-EPERM: operation not permitted, rename '...\dsh-chat-preset_tmp_15912_4' -> '...\dsh-chat-preset'
-```
-
-原因是 Windows 的 `MoveFileEx` **不能** rename 覆盖一个已存在的目录（空目录也不行），而 POSIX 允许——
-所以这个错几乎只在 Windows 上出现。pnpm 的 import 是「临时目录 → rename」，目标还在就卡死。
-
-绕过：**先把目标条目摘掉，再执行 add。**
-
-```powershell
-# 摘链。只删链接本身，不会动到链接指向的仓库
-(Get-Item 'C:\Users\<you>\.dsh\profiles\<profile>\node_modules\<pkg>' -Force).Delete()
-```
-
-> 用 `.Delete()` 而不是 `rm -rf`：前者对 reparse point 语义明确（只摘链）。实测 Node 的
-> `fs.rmSync(recursive)` 和 Git Bash 的 `rm -rf` 在这台机器上都不会跟进目标，但不同 MSYS /
-> 文件系统驱动版本行为不一致，没有必要冒险。
-
-然后正常 `dsh plugin --profile <p> add <spec>` 即可。
-
 ## 测试
 
 ```bash
@@ -178,8 +153,6 @@ node test.mjs    # 11 项：作用域隔离、预设判定、幂等、降级
 ```
 
 不依赖任何第三方包，只用到 `node:` 内置模块，clone 下来直接能跑。
-
-另有一套 17 项的集成测试，跑的是真实 `cordis` / `dsh-scope` / `dsh-system-prompt`（验证 `step()` 请求路径、工具剥离、`section` 热读）。它需要从 dsh 桌面端 `app.asar` 里抽出的 `@deepseek-ai/*`，**无法在仓库内独立运行**，因此不随仓库发布。
 
 ## License
 
