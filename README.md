@@ -74,23 +74,18 @@ dsh plugin --profile desktop add /absolute/path/to/dsh-chat-preset
 装了没反应，先按这三条查，不用猜。下面用 `desktop` 举例，换 profile 就改这个名字：
 
 ```bash
-# 1. 依赖和 bundles 里都该有它（输出形如：^1.1.1 true）
+# 1. 依赖装上了，bundles 里也有它（输出形如：^1.1.1 true）
 node -e "const p=require(require('os').homedir()+'/.dsh/profiles/desktop/package.json');console.log(p.dependencies['dsh-chat-preset'], p.dsh.profile.bundles.includes('dsh-chat-preset'))"
 
-# 2. 合成树里应出现两行（policy + section）
-dsh --profile desktop --dump-config | grep -A2 dsh-chat-preset
+# 2. 包确实在依赖树里（应输出 dsh-chat-preset@<版本>）
+dsh plugin --profile desktop ls | grep dsh-chat-preset
 
 # 3. 重启 dsh —— bundles 只在启动时合成，运行中不监听
 ```
 
-第 2 条正确的话会长这样：
+前两条只能证明"装上了"，第三条才是"生效"。如果重启后 ChatOnly 仍不在预设列表里，看第 1 条是不是 `false`。
 
-```yaml
-# == dsh-chat-preset
-- id: chatonly-context-policy
-  name: dsh-chat-preset
-- id: preset-chat
-```
+> `dsh --profile desktop --dump-config` 会报 *profile "desktop" is managed exclusively by the Electron application*——桌面端 profile 不允许 CLI 渲染配置树。想直接看合成结果，用一个 CLI 管的 profile（`web` / `headless`）装一次即可。
 
 ## 用法
 
