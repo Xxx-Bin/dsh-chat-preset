@@ -1,0 +1,55 @@
+name: Publish
+
+# 推 tag 即发布：git tag v1.2.0 && git push origin v1.2.0
+# 前置条件：仓库 Settings → Secrets and variables → Actions 里存在 NPM_TOKEN，
+#          且该 token 是 npm 的 Automation 类型（Automation token 不受账号 2FA 拦截；
+#          Publish token 仍会要求 OTP，在 CI 里必然失败）。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只打包不上传'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org   # 覆盖本机/环境可能指向的镜像源
+
+      - name: Run tests
+        run: node test.mjs
+
+      # tag 与 package.json 版本不一致时直接失败，避免把 v1.2.0 发成 1.2.1
+      - name: Check tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(node -p "require('./package.json').version")"
+          echo "tag=$tag version=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag $tag does not match package.json version $ver"
+            exit 1
+          fi
+
+      - name: Publish
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm publish --dry-run --access public
+          else
+            npm publish --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

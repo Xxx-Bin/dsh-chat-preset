@@ -2,6 +2,7 @@
 
 > ChatOnly —— 本项目提供的预设 agent。抑制工具注入与工作目录注入，使请求仅包含用户输入，以及可选的自定义系统提示词。
 
+[![CI](https://github.com/Xxx-Bin/dsh-chat-preset/actions/workflows/ci.yml/badge.svg)](https://github.com/Xxx-Bin/dsh-chat-preset/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-chat-preset.svg)](https://www.npmjs.com/package/dsh-chat-preset)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a.svg)](https://nodejs.org)
@@ -242,6 +243,23 @@ node test.mjs
 25 项测试，全部通过。基于 `@deepseek-ai/dsh-system-prompt` 与 `agent-loop step()` 的等价模型，覆盖作用域隔离、预设判定、幂等性、能力缺失时的降级、工具瀑布的两种模式（抑制清空／放行后其它插件的增删可见）以及 `/chattools` 的切换语义。仅依赖 `node:` 内置模块。
 
 测试使用等价装配模型而非 DSH 本体；真实链路仍以新建 ChatOnly 会话检查请求为准。
+
+CI 在 Node 18／20／22 上运行同一套测试（`.github/workflows/ci.yml`）。
+
+## 发布
+
+推版本标签即触发 npm 发布（`.github/workflows/publish.yml`）：
+
+```bash
+npm version patch            # 或 minor / major，同时打 tag（如 v1.2.0）
+git push --follow-tags
+```
+
+工作流依次执行：测试 → 校验 tag 与 `package.json` 版本一致 → `npm publish --access public`。版本不一致或测试失败时不会发布。
+
+前置条件：仓库 Secrets 中存在 `NPM_TOKEN`，且必须是 npm 的 **Automation** 类型令牌。Publish 类型令牌仍会要求 OTP，在 CI 中必然失败（EOTP）。
+
+> 本机 `~/.npmrc` 若将 registry 指向镜像（如 `registry.npmmirror.com`），手动发布需显式指定 `--registry https://registry.npmjs.org`；工作流的 `setup-node` 已固定为官方源。
 
 ## License
 
