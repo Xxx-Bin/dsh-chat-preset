@@ -6,7 +6,11 @@
 #   - shadows the required `working-directory:current` contribution, so the
 #     runtime-context snapshot never reaches the request or the session log;
 #   - clears `assembly.tools`, because global tool providers are collected for
-#     every preset and a preset row cannot remove them;
+#     every preset and a preset row cannot remove them. That interception is a
+#     LIVE switch, not this file: `stripTools` is only the factory default, the
+#     current value lives in `toolsStateFile` and is flipped with
+#     `/chattools on|off`. With the switch off the assembly is passed through
+#     untouched, so other plugins own the tool list again;
 #   - registers `/chatprompt`, the composer-side editor for the prompt file.
 #
 # Row 2 (`preset-chat`) defines the preset. Its `plugins` list mounts THIS
@@ -27,14 +31,15 @@
         role: 'policy'
         presetId: 'chatonly'
         contextName: 'working-directory:current'
-        stripTools: true
+        stripTools: true                                   # 出厂默认；运行中用 /chattools 切
+        toolsStateFile: '~/.dsh/chatonly-strip-tools.state' # 当前开关值（strip/pass），缺省即默认
         file: '~/.dsh/chatonly-system-prompt.md'
     - id: preset-chat
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: chatonly
         name: ChatOnly
-        description: '纯对话：无工具无技能；系统提示词来自 ~/.dsh/chatonly-system-prompt.md（留空则仅发送用户输入）'
+        description: '纯对话：默认不注入工具与工作区上下文；系统提示词来自 ~/.dsh/chatonly-system-prompt.md（留空则仅发送用户输入）；/chattools 可放行工具'
         order: 5
         plugins:
           - id: prompt

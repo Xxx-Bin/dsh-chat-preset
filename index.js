@@ -60,8 +60,8 @@
  * `Current runtime context: none.` marker (retained -> CLEARED). New chatonly
  * sessions never see it.
  *
- * Tools (config: stripTools, default on)
- * --------------------------------------
+ * Tools (switch: `/chattools`, factory default = intercept)
+ * ---------------------------------------------------------
  * A preset row cannot remove tools: `assemble()` collects every GLOBAL tool
  * provider unconditionally (`dsh-system-prompt`:364-365) and there is no
  * `suppressTools()` counterpart to `suppressRuntimeContext()`. With tools
@@ -70,6 +70,17 @@
  * schemas. The assembly waterfall fixes it: `buildRequest(…, assembly.tools, …)`
  * emits `{ tools }` only when the list is non-empty (`dsh-agent-loop`:1217-1220),
  * so clearing `assembly.tools` means the model is offered no tools at all.
+ *
+ * Interception is a live switch, not a build-time config:
+ *   - `~/.dsh/chatonly-strip-tools.state` — one word (`strip` / `pass`), read on
+ *     every assembly and written by `/chattools on|off`. Missing = the factory
+ *     default, `config.stripTools` (true).
+ *   - With the switch OFF the listener returns the downstream assembly verbatim,
+ *     so any other plugin's tool provider or filter behaves exactly as it would
+ *     without this package installed. That is the "let someone else manage it"
+ *     mode — this package never adds tools of its own, it only clears the list.
+ *   - `config.stripTools: false` therefore means "ship turned off", not "toggle
+ *     disabled": `/chattools on` can still turn interception on later.
  *
  * @module dsh-chat-preset
  */
@@ -102,6 +113,15 @@ export const name = 'chat-preset';
 export const inject = ['sessionProjections', 'systemPrompt', 'commands'];
 
 const DEFAULT_PRESET_ID = 'chatonly';
+/**
+ * The tool-interception switch. One line of text; absent/empty = factory default
+ * (`config.stripTools`, itself defaulting to true). Read on every assembly, so
+ * `/chattools off` applies to the next message — no restart.
+ */
+const DEFAULT_TOOLS_STATE_FILE = '~/.dsh/chatonly-strip-tools.state';
+/** Accepted spellings in the state file / `/chattools` argument. */
+const SWITCH_ON = new Set(['on', 'strip', 'intercept', 'block', 'true', '1']);
+const SWITCH_OFF = new Set(['off', 'pass', 'allow', 'bypass', 'false', '0']);
 /** The working-directory contribution owned by `dsh-working-directory`. */
 const DEFAULT_CONTEXT_NAME = 'working-directory:current';
 /** Fallback placement = `CONTEXT_ORDERS.WORKING_DIRECTORY` in `dsh-system-prompt`. */
@@ -115,11 +135,17 @@ const PERSONA_SUFFIX_SECTION = 'deployment:persona-suffix';
 function applyPolicy(ctx, config = {}) {
   const presetId = config.presetId ?? DEFAULT_PRESET_ID;
   const contextName = config.contextName ?? DEFAULT_CONTEXT_NAME;
-  const stripTools = config.stripTools ?? true;
+  const toolsStateFile = expandHome(config.toolsStateFile ?? DEFAULT_TOOLS_STATE_FILE);
+  /** Factory default for the switch; the state file (see `/chattools`) overrides it. */
+  const stripToolsDefault = config.stripTools ?? true;
   /** Agents whose shadow contribution is already installed (per agent, never reused). */
   const installed = new WeakSet();
+  /** Last observed switch value, so diagnostics fire on flips instead of per step. */
+  let lastStrip;
 
-  dbg({ evt: 'applied', presetId, contextName, stripTools, pid: process.pid });
+  const stripToolsNow = () => readSwitch(toolsStateFile, stripToolsDefault);
+
+  dbg({ evt: 'applied', presetId, contextName, stripTools: stripToolsNow(), toolsStateFile, pid: process.pid });
 
   ctx.on('agent/pre-step', (payload, next) => {
     const agent = payload?.agent;
@@ -148,31 +174,119 @@ function applyPolicy(ctx, config = {}) {
   // add, never remove — so a preset row cannot drop tools. The assembly
   // waterfall is the one place that can: `buildRequest(..., assembly.tools, ...)`
   // omits `tools` entirely when the list is empty.
-  if (stripTools) {
-    ctx.on('system-prompt/assemble', async (assembly, context, next) => {
-      const out = await next();
-      try {
-        const agent = context?.agent;
-        if (agent === undefined || agent === null) return out;
-        if (readPresetId(ctx, agent) !== presetId) return out;
-        const tools = out?.tools;
-        if (!Array.isArray(tools) || tools.length === 0) return out;
-        dbg({
-          evt: 'strip-tools',
-          count: tools.length,
-          names: tools.map((tool) => tool?.name).slice(0, 20),
-          sessionId: agent?.session?.id ?? null,
-        });
-        return { ...out, tools: [] };
-      } catch (error) {
-        dbg({ evt: 'error', stage: 'strip-tools', message: String(error) });
-        return out;
-      }
-    });
-  }
+  //
+  // The listener is ALWAYS registered, even when the switch is off: that is what
+  // makes `/chattools off|on` a live toggle. With the switch off the assembly is
+  // returned verbatim, so every other plugin's tool provider / filter keeps
+  // working exactly as it would without this package.
+  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
+    const out = await next();
+    try {
+      const agent = context?.agent;
+      if (agent === undefined || agent === null) return out;
+      if (readPresetId(ctx, agent) !== presetId) return out;
 
+      const strip = stripToolsNow();
+      if (strip !== lastStrip) {
+        lastStrip = strip;
+        dbg({ evt: 'tools-mode', strip, file: toolsStateFile, sessionId: agent?.session?.id ?? null });
+      }
+      if (!strip) return out; // pass-through: other plugins own the tool list
+
+      const tools = out?.tools;
+      if (!Array.isArray(tools) || tools.length === 0) return out;
+      dbg({
+        evt: 'strip-tools',
+        count: tools.length,
+        names: tools.map((tool) => tool?.name).slice(0, 20),
+        sessionId: agent?.session?.id ?? null,
+      });
+      return { ...out, tools: [] };
+    } catch (error) {
+      dbg({ evt: 'error', stage: 'strip-tools', message: String(error) });
+      return out;
+    }
+  });
+
+  registerToolsCommand(ctx, toolsStateFile, stripToolsDefault);
   registerCommand(ctx, config.file ?? DEFAULT_PROMPT_FILE);
 }
+
+// --- the tool switch ---------------------------------------------------------
+
+/** Last unrecognized state value already reported, per file. */
+const complained = new Map();
+
+/** The persisted switch, falling back to the factory default. Never throws. */
+function readSwitch(file, fallback) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8').trim().toLowerCase();
+  } catch {
+    return fallback; // missing file = never toggled
+  }
+  if (raw.length === 0) return fallback;
+  if (SWITCH_ON.has(raw)) return true;
+  if (SWITCH_OFF.has(raw)) return false;
+  // Assembled on every request: complain once per distinct bad value, not per turn.
+  if (complained.get(file) !== raw) {
+    complained.set(file, raw);
+    dbg({ evt: 'miss', stage: 'tools-state', reason: `unrecognized "${raw}"`, file });
+  }
+  return fallback;
+}
+
+function describeSwitch(strip, file) {
+  return strip
+    ? `当前：**拦截工具** —— ChatOnly 请求里不带任何工具 schema。\n文件：${file}`
+    : `当前：**放行工具** —— 工具由其他插件/预设决定，本包不干预。\n文件：${file}`;
+}
+
+/**
+ * `/chattools [on | off | status | reset]` — the live switch for tool
+ * interception. Writing the file is enough: the assembly listener re-reads it on
+ * the next request.
+ */
+function registerToolsCommand(ctx, file, fallback) {
+  ctx.effect(() => ctx.commands.register({
+    name: 'chattools',
+    description: '切换 ChatOnly 是否拦截工具（默认拦截；关闭后由其他插件管理工具）',
+    input: { hint: 'on | off | status | reset' },
+    handler: async (invocation) => {
+      const arg = String(invocation?.rawInput ?? '').trim().toLowerCase();
+      if (arg.length === 0 || arg === 'status') {
+        return { kind: 'success', text: `${describeSwitch(readSwitch(file, fallback), file)}\n用法：/chattools on | off | reset` };
+      }
+      if (arg === 'reset') {
+        try {
+          fs.rmSync(file, { force: true });
+          return { kind: 'success', text: `已恢复默认（${fallback ? '拦截' : '放行'}），下一条消息生效。` };
+        } catch (error) {
+          return { kind: 'error', text: `删除失败：${String(error)}` };
+        }
+      }
+      let value;
+      if (SWITCH_ON.has(arg)) value = true;
+      else if (SWITCH_OFF.has(arg)) value = false;
+      else return { kind: 'error', text: `不认识的参数「${arg}」。用法：/chattools on | off | status | reset` };
+
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, value ? 'strip' : 'pass', 'utf8');
+      } catch (error) {
+        return { kind: 'error', text: `写入失败：${String(error)}` };
+      }
+      dbg({ evt: 'tools-toggle', strip: value, file, via: 'command' });
+      return {
+        kind: 'success',
+        text: value
+          ? `已切换为**拦截**：下一条消息起 ChatOnly 不带工具。\n文件：${file}`
+          : `已切换为**放行**：下一条消息起工具由其他插件/预设决定，本包不再清空。\n文件：${file}`,
+      };
+    },
+  }), 'chat-preset.tools-command()');
+}
+
 
 /**
  * The preset a Session currently runs under, from the `agentPreset` Session

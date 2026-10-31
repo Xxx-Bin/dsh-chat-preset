@@ -1,4 +1,7 @@
 import { apply } from './index.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 // keep test runs out of the app's debug log
 process.env.DSH_FILTER_RTC_DEBUG = '0';
@@ -106,7 +109,18 @@ const project = (current, sections) => (current.length === 0 ? undefined : {
 });
 
 // --- harness ---------------------------------------------------------------
-function makeWorld({ presetId, headerPreset = presetId, suppressed = true, hasScopedPrompt = true }) {
+const BASE_TOOLS = [
+  { name: 'acp_status' },
+  { name: 'working_directory' },
+  { name: 'search_context' },
+];
+
+/** A state file inside a throwaway dir — never the user's real ~/.dsh one. */
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-chat-preset-'));
+let tmpSeq = 0;
+const tmpState = () => path.join(TMP_DIR, `state-${++tmpSeq}.txt`);
+
+function makeWorld({ presetId, headerPreset = presetId, suppressed = true, hasScopedPrompt = true, stripTools, toolsStateFile = tmpState(), extraToolProvider } = {}) {
   const prompt = makePrompt();
   const session = { id: 'sess-1', header: { agentPreset: headerPreset } };
   const agent = { id: 'agent-1', session };
@@ -114,14 +128,19 @@ function makeWorld({ presetId, headerPreset = presetId, suppressed = true, hasSc
   if (suppressed) prompt.layerOf(agent).suppressors += 1;   // persona includeRuntimeContext:false
 
   const listeners = [];
+  const assembleListeners = [];
+  const commands = [];
   const ctx = {
-    on(evt, cb) { if (evt === 'agent/pre-step') listeners.push(cb); },
+    on(evt, cb) {
+      if (evt === 'agent/pre-step') listeners.push(cb);
+      else if (evt === 'system-prompt/assemble') assembleListeners.push(cb);
+    },
     sessionProjections: { stateOf: (s, key) => (s === session && key === 'agentPreset' ? presetId : undefined) },
-    commands: { register: () => () => {} },
+    commands: { register: (cmd) => { commands.push(cmd); return () => {}; } },
     effect(fn) { return fn(); },
     logger: { warn: (...a) => console.log('   [warn]', ...a) },
   };
-  apply(ctx, { presetId: 'chatonly' });
+  apply(ctx, { presetId: 'chatonly', stripTools, toolsStateFile });
 
   const claimed = [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }];
 
@@ -147,7 +166,26 @@ function makeWorld({ presetId, headerPreset = presetId, suppressed = true, hasSc
       return { decision, surface, assembly };
     });
   };
-  return { prompt, agent, run };
+
+  /**
+   * The `system-prompt/assemble` waterfall: base tool list -> (other plugin, if
+   * any) -> this package. Returns what `buildRequest` would see.
+   */
+  const tools = async () => {
+    const base = { tools: BASE_TOOLS.map((t) => ({ ...t })), contexts: [] };
+    const defaults = () => Promise.resolve(extraToolProvider === undefined ? base : extraToolProvider(base));
+    let chain = defaults;
+    for (let i = assembleListeners.length - 1; i >= 0; i--) {
+      const cb = assembleListeners[i];
+      const prev = chain;
+      chain = () => cb(base, { agent }, prev);
+    }
+    const out = await chain();
+    // buildRequest(): omit the key entirely when the list is empty.
+    return Array.isArray(out.tools) && out.tools.length === 0 ? undefined : out.tools;
+  };
+  const command = (name) => commands.find((c) => c.name === name);
+  return { prompt, agent, run, tools, commands, command, toolsStateFile };
 }
 
 let failures = 0;
@@ -221,5 +259,59 @@ const runtimeContextOn = (surface) => surface.filter((m) => m.source?.kind === '
   check('f: plugin returns the downstream decision unchanged', out === original);
 }
 
+// g) tools: factory default is interception
+{
+  const w = makeWorld({ presetId: 'chatonly' });
+  const tools = await w.tools();
+  check('g: chatonly, no state file -> tools omitted from the request', tools === undefined, JSON.stringify(tools));
+  check('g2: no state file is created just by assembling', !fs.existsSync(w.toolsStateFile), w.toolsStateFile);
+}
+
+// h) tools: the switch off hands the list back to everyone else
+{
+  const otherAdds = (assembly) => ({ ...assembly, tools: [...assembly.tools, { name: 'other_plugin_tool' }] });
+  const file = tmpState();
+  fs.writeFileSync(file, 'pass\n', 'utf8');
+  const w = makeWorld({ presetId: 'chatonly', toolsStateFile: file, extraToolProvider: otherAdds });
+  const tools = await w.tools();
+  check('h: switch off -> tools survive, other plugin keeps control', Array.isArray(tools) && tools.length === BASE_TOOLS.length + 1, JSON.stringify(tools?.map((t) => t.name)));
+  check('h2: the other plugin\'s addition is present', tools?.some((t) => t.name === 'other_plugin_tool'));
+
+  const w2 = makeWorld({ presetId: 'standard', toolsStateFile: file });
+  const tools2 = await w2.tools();
+  check('h3: other preset still untouched with the switch off', Array.isArray(tools2) && tools2.length === BASE_TOOLS.length);
+}
+
+// i) tools: `/chattools` flips the switch live, no restart
+{
+  const w = makeWorld({ presetId: 'chatonly' });
+  const cmd = w.command('chattools');
+  check('i: /chattools is registered', typeof cmd?.handler === 'function');
+  const call = (raw) => cmd.handler({ rawInput: raw });
+
+  check('i2: default state reads as intercept', (await call('')).text.includes('拦截工具'));
+  const off = await call('off');
+  check('i3: `/chattools off` succeeds', off.kind === 'success' && off.text.includes('放行'), off.text);
+  check('i4: next assembly passes tools through', (await w.tools())?.length === BASE_TOOLS.length);
+
+  const on = await call('on');
+  check('i5: `/chattools on` restores interception', on.kind === 'success' && (await w.tools()) === undefined, on.text);
+
+  const bogus = await call('maybe');
+  check('i6: unknown argument is rejected, switch untouched', bogus.kind === 'error' && (await w.tools()) === undefined, bogus.text);
+
+  const reset = await call('reset');
+  check('i7: `reset` deletes the file and falls back to the default', reset.kind === 'success' && (await w.tools()) === undefined);
+}
+
+// j) tools: `stripTools: false` is the factory default, not a hard opt-out
+{
+  const w = makeWorld({ presetId: 'chatonly', stripTools: false });
+  check('j: stripTools:false -> nothing stripped before any toggle', (await w.tools())?.length === BASE_TOOLS.length);
+  await w.command('chattools').handler({ rawInput: 'on' });
+  check('j2: /chattools on still works over that default', (await w.tools()) === undefined);
+}
+
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} FAILURES`);
+fs.rmSync(TMP_DIR, { recursive: true, force: true });
 process.exit(failures === 0 ? 0 : 1);
