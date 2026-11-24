@@ -53,13 +53,41 @@ jobs:
             exit 1
           fi
 
+      # 输出同时落盘、逐行回显、并写进 step summary：上一次发布报绿但 registry
+      # 上没有版本，而没有日志就无法定位。带管道时必须自己取退出码，
+      # 否则 `| tee` 会把 npm 的失败吞成 0。
       - name: Publish
+        shell: bash
         run: |
+          log=publish.log
+          args=(--access public --provenance --loglevel=verbose)
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            npm publish --dry-run --access public --provenance
-          else
-            npm publish --access public --provenance
+            args+=(--dry-run)
           fi
+          {
+            echo "npm      : $(npm --version)"
+            echo "node     : $(node --version)"
+            echo "registry : $(npm config get registry)"
+            echo "package  : $(node -p "require('./package.json').name + '@' + require('./package.json').version")"
+            echo "dry_run  : ${{ inputs.dry_run }}"
+            echo "args     : ${args[*]}"
+          } | tee "$log"
+
+          set +e
+          npm publish "${args[@]}" > "$log.publish" 2>&1
+          status=$?
+          set -e
+          cat "$log.publish"
+          cat "$log.publish" >> "$log"
+
+          {
+            echo "### npm publish — exit $status"
+            echo '```'
+            tail -80 "$log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $status
         env:
           # 必须显式置空：setup-node 会注入 NODE_AUTH_TOKEN 占位值，非空时会压过 OIDC
           NODE_AUTH_TOKEN: ""
