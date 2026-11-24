@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/Xxx-Bin/dsh-chat-preset/actions/workflows/ci.yml/badge.svg)](https://github.com/Xxx-Bin/dsh-chat-preset/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/dsh-chat-preset.svg)](https://www.npmjs.com/package/dsh-chat-preset)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Xxx-Bin/dsh-chat-preset/blob/main/LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A518-3c873a.svg)](https://nodejs.org)
 
 > **安装前须知。** 本包不依赖公开插件 API，其行为由 DSH 的三处内部语义决定（作用域同名 shadow 覆盖、`system-prompt/assemble` 瀑布、`refreshContext()` 的合并顺序）。上述语义变更时，本包会**静默失效**：不报错、不崩溃，仅退回默认请求形态。详见[兼容性与脆弱性](#兼容性与脆弱性)。
@@ -46,7 +46,7 @@ DSH 默认的最小配置是精简模式。即便在该模式下，请求仍包�
 | 移除全局工具 schema | 工具在全局层收集，预设作用域只可追加；不存在 `suppressTools()` |
 | 改写 `agent/pre-step` 决策 | `dsh-agent-loop` 的 `step()` 会重新计算上下文并写入 surface，从 decision 中移除消息只会使其在 fallback 分支重建 |
 
-本包因此改由三处机制实现：agent 作用域内的同名空 shadow、`system-prompt/assemble` 瀑布、以及 `buildRequest()` 在工具列表为空时省略该键的行为。推导过程与源码行号见 [`index.js`](./index.js) 头部注释。
+本包因此绕开预设层，改在两处下手：工作目录用 agent 作用域内的同名空 shadow 覆盖；工具抑制在注册表视图层用 `ctx.tools.restrict({ allow: [] })` 把继承工具判为不可见（装配瀑布做不到——`assemble()` 在瀑布之后才挂 `tools`），再由 `buildRequest()` 在列表为空时省略该键。推导过程与源码行号见 [`index.js`](https://github.com/Xxx-Bin/dsh-chat-preset/blob/main/index.js) 头部注释。
 
 ## 安装
 
@@ -300,4 +300,4 @@ git push --follow-tags
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](https://github.com/Xxx-Bin/dsh-chat-preset/blob/main/LICENSE)
