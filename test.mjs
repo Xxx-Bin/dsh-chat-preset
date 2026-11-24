@@ -7,8 +7,10 @@ import path from 'node:path';
 process.env.DSH_FILTER_RTC_DEBUG = '0';
 
 // ---------------------------------------------------------------------------
-// Faithful-enough model of the installed build's @deepseek-ai/dsh-system-prompt
-// + dsh-agent-loop step() semantics (see index.js header for the source lines).
+// Faithful-enough model of the installed build:
+//   - @deepseek-ai/dsh-system-prompt  assemble() / refreshContext()
+//   - @deepseek-ai/dsh-tools          view(scope) + restrict()  (see index.js)
+//   - dsh-agent-loop                  claim() -> resolve() -> assemble() -> pre-step
 // ---------------------------------------------------------------------------
 
 const WORKING_DIRECTORY = 'working-directory:current';
@@ -92,7 +94,7 @@ function makePrompt() {
   };
 }
 
-// --- renderContextSections / joinContextSections / project / step -----------
+// --- renderContextSections / joinContextSections / project ---------------
 const renderContextSections = (assembly) => assembly.contexts
   .map((c) => ({ name: c.name, text: c.interpolate === false ? c.text : c.text }))
   .filter((s) => s.text.length > 0);
@@ -108,34 +110,133 @@ const project = (current, sections) => (current.length === 0 ? undefined : {
   source: sections.length === 0 ? { kind: 'runtime-context' } : { kind: 'runtime-context', form: 'snapshot', sections },
 });
 
+// --- dsh-tools model: view(scope) + restrict() ------------------------------
+// Global tools stand for what the desktop bundles register (acp_*, …); preset
+// tools stand for rows in the preset's own `plugins` list (the tool-web row).
+function makeTools({ globalNames = [], presetNames = [] } = {}) {
+  const presetScope = { kind: 'preset' };
+  const globalLayer = { tools: new Map(globalNames.map((n) => [n, { name: n }])), restrictions: [] };
+  const layers = new Map();
+  const layerOf = (scope) => {
+    if (scope === undefined) return globalLayer;
+    let layer = layers.get(scope);
+    if (layer === undefined) { layer = { tools: new Map(), restrictions: [] }; layers.set(scope, layer); }
+    return layer;
+  };
+  for (const name of presetNames) layerOf(presetScope).tools.set(name, { name });
+
+  /** Nearest-first chain: agent -> preset (root/global is separate). */
+  const chainOf = (scope) => {
+    const chain = [];
+    for (let s = scope; s !== undefined; s = s.parent) chain.push(layerOf(s));
+    return chain;
+  };
+  /** dsh-tools:392 — a restriction denies a name unless every filter admits it. */
+  const admits = (layer, name) => layer.restrictions.every((f) => !(
+    (f.allow !== undefined && !f.allow.has(name)) || (f.deny !== undefined && f.deny.has(name))
+  ));
+
+  /** dsh-tools:477 — inherited tools pass every layer's admits(); own tools skip it. */
+  const view = (scope) => {
+    const chain = chainOf(scope);
+    const own = chain[0];
+    const inherited = new Map(globalLayer.tools);
+    for (const layer of [...chain].reverse()) {
+      if (layer === own) continue;
+      for (const [name, reg] of layer.tools) inherited.set(name, reg);
+    }
+    const visible = new Map();
+    for (const [name, reg] of inherited) if (chain.every((layer) => admits(layer, name))) visible.set(name, reg);
+    for (const [name, reg] of own.tools) visible.set(name, reg);
+    return visible;
+  };
+
+  /** dsh-tools:453 — records one restriction in the CALLING scope's layer. */
+  const restrictIn = (scope, filter) => {
+    if (scope === undefined) throw new Error('tools.restrict() requires a scoped context (agent.ctx)');
+    if (filter.allow === undefined && filter.deny === undefined) throw new Error('tools.restrict({}) is a no-op');
+    const compiled = {};
+    if (filter.allow !== undefined) compiled.allow = new Set(filter.allow);
+    if (filter.deny !== undefined) compiled.deny = new Set(filter.deny);
+    const list = layerOf(scope).restrictions;
+    list.push(compiled);
+    let lifted = false;
+    return () => {
+      if (lifted) return;
+      lifted = true;
+      const index = list.indexOf(compiled);
+      if (index >= 0) list.splice(index, 1);
+    };
+  };
+
+  const restrictionCount = (scope) => layerOf(scope).restrictions.length;
+  const names = (scope) => [...view(scope).keys()];
+  return { presetScope, layerOf, view, restrictIn, restrictionCount, names };
+}
+
 // --- harness ---------------------------------------------------------------
-const BASE_TOOLS = [
-  { name: 'acp_status' },
-  { name: 'working_directory' },
-  { name: 'search_context' },
-];
+const BASE_TOOLS = ['acp_status', 'working_directory', 'search_context'];
+/** The `tool-web` row now declared in cordis.patch.yml under the preset. */
+const PRESET_TOOLS = ['web_search', 'web_fetch'];
 
 /** A state file inside a throwaway dir — never the user's real ~/.dsh one. */
 const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-chat-preset-'));
 let tmpSeq = 0;
 const tmpState = () => path.join(TMP_DIR, `state-${++tmpSeq}.txt`);
 
-function makeWorld({ presetId, headerPreset = presetId, suppressed = true, hasScopedPrompt = true, stripTools, toolsStateFile = tmpState(), extraToolProvider } = {}) {
+function makeWorld({
+  presetId,
+  headerPreset = presetId,
+  suppressed = true,
+  hasScopedPrompt = true,
+  stripTools,
+  toolsStateFile = tmpState(),
+  presetToolNames = presetId === 'chatonly' ? PRESET_TOOLS : [],
+  agentToolNames = [],
+} = {}) {
   const prompt = makePrompt();
   const session = { id: 'sess-1', header: { agentPreset: headerPreset } };
   const agent = { id: 'agent-1', session };
-  if (hasScopedPrompt) agent.ctx = { systemPrompt: prompt.forScope(agent) };
+  const registry = makeTools({ globalNames: BASE_TOOLS, presetNames: presetToolNames });
+  agent.parent = registry.presetScope;
+  for (const name of agentToolNames) registry.layerOf(agent).tools.set(name, { name });
+
   if (suppressed) prompt.layerOf(agent).suppressors += 1;   // persona includeRuntimeContext:false
 
+  const claimedListeners = [];
   const listeners = [];
-  const assembleListeners = [];
   const commands = [];
+  const mounts = { plugin: 0, apply: 0 };
+
+  const scopePrompt = prompt.forScope(agent);
+  // What `inject: ['tools']` resolves in the agent scope: a facade bound to it.
+  const scopeFacade = {
+    systemPrompt: scopePrompt,
+    tools: {
+      restrict: (filter) => registry.restrictIn(agent, filter),
+      get: (name) => registry.view(agent).get(name),
+    },
+  };
+
+  if (hasScopedPrompt) {
+    agent.ctx = {
+      systemPrompt: scopePrompt,
+      /** cordis `ctx.plugin()`: applies at once when the declared inject resolves. */
+      plugin(def) {
+        mounts.plugin++;
+        const missing = (def.inject ?? []).filter((key) => scopeFacade[key] === undefined);
+        if (missing.length === 0) { mounts.apply++; def.apply(scopeFacade); }
+      },
+    };
+  }
+
+  let currentPreset = presetId;
   const ctx = {
     on(evt, cb) {
       if (evt === 'agent/pre-step') listeners.push(cb);
-      else if (evt === 'system-prompt/assemble') assembleListeners.push(cb);
+      else if (evt === 'agent/inbox/claimed') claimedListeners.push(cb);
     },
-    sessionProjections: { stateOf: (s, key) => (s === session && key === 'agentPreset' ? presetId : undefined) },
+    sessionProjections: { stateOf: (s, key) => (s === session && key === 'agentPreset' ? currentPreset : undefined) },
     commands: { register: (cmd) => { commands.push(cmd); return () => {}; } },
     effect(fn) { return fn(); },
     logger: { warn: (...a) => console.log('   [warn]', ...a) },
@@ -144,48 +245,58 @@ function makeWorld({ presetId, headerPreset = presetId, suppressed = true, hasSc
 
   const claimed = [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } }];
 
-  /** One full turn step: preStep (assembly -> waterfall -> decision) then step(). */
-  const run = () => {
-    const assembly = prompt.assemble(agent);
+  /** dsh-agent-loop:683 — claim emits synchronously, BEFORE resolve/assemble. */
+  const claim = (messages) => {
+    for (const message of messages) for (const cb of claimedListeners) cb({ agent, message, turn: 1 });
+  };
+
+  /** What buildRequest would carry: `tools` is omitted when the list is empty. */
+  const requestTools = () => {
+    const list = [...registry.view(agent).values()];
+    return list.length === 0 ? undefined : list;
+  };
+
+  /** preStep (:683 claim -> :686 resolve -> :692 assemble -> :698 waterfall). */
+  const run = (messages = claimed) => {
+    claim(messages);
+    const assembly = { ...prompt.assemble(agent), tools: [...registry.view(agent).values()] };
     const defaultDecision = () => {
       const sections = renderContextSections(assembly);
       const context = project(joinContextSections(sections), sections);
-      return Promise.resolve({ kind: 'enter', messages: context === undefined ? [...claimed] : [...claimed, context] });
+      return Promise.resolve({ kind: 'enter', messages: context === undefined ? [...messages] : [...messages, context] });
     };
     let chain = defaultDecision;
     for (let i = listeners.length - 1; i >= 0; i--) {
       const cb = listeners[i];
       const prev = chain;
-      chain = () => cb({ agent, messages: claimed, turn: 1, step: 1, signal: new AbortController().signal }, prev);
+      chain = () => cb({ agent, messages, turn: 1, step: 1, signal: new AbortController().signal }, prev);
     }
     return chain().then((decision) => {
       // step(): the request path recomputes the context, ignoring decision.messages.
       const sections = renderContextSections(prompt.refreshContext(agent, assembly));
       const context = project(joinContextSections(sections), sections);
-      const surface = [...claimed, ...(context === undefined ? [] : [context])];
+      const surface = [...messages, ...(context === undefined ? [] : [context])];
       return { decision, surface, assembly };
     });
   };
 
-  /**
-   * The `system-prompt/assemble` waterfall: base tool list -> (other plugin, if
-   * any) -> this package. Returns what `buildRequest` would see.
-   */
-  const tools = async () => {
-    const base = { tools: BASE_TOOLS.map((t) => ({ ...t })), contexts: [] };
-    const defaults = () => Promise.resolve(extraToolProvider === undefined ? base : extraToolProvider(base));
-    let chain = defaults;
-    for (let i = assembleListeners.length - 1; i >= 0; i--) {
-      const cb = assembleListeners[i];
+  /** One more message's worth of assembly, without running the context part. */
+  const stepTools = () => { claim(claimed); return requestTools(); };
+
+  /** The pre-step waterfall alone (no new message claimed) — the fallback path. */
+  const preStep = () => {
+    let chain = () => Promise.resolve({ kind: 'enter', messages: [] });
+    for (let i = listeners.length - 1; i >= 0; i--) {
+      const cb = listeners[i];
       const prev = chain;
-      chain = () => cb(base, { agent }, prev);
+      chain = () => cb({ agent, messages: [], turn: 1, step: 1 }, prev);
     }
-    const out = await chain();
-    // buildRequest(): omit the key entirely when the list is empty.
-    return Array.isArray(out.tools) && out.tools.length === 0 ? undefined : out.tools;
+    return chain();
   };
+
   const command = (name) => commands.find((c) => c.name === name);
-  return { prompt, agent, run, tools, commands, command, toolsStateFile };
+  const switchPreset = (id) => { currentPreset = id; };
+  return { prompt, agent, registry, mounts, run, tools: stepTools, requestTools, preStep, switchPreset, commands, command, toolsStateFile, presetScope: registry.presetScope };
 }
 
 let failures = 0;
@@ -259,57 +370,116 @@ const runtimeContextOn = (surface) => surface.filter((m) => m.source?.kind === '
   check('f: plugin returns the downstream decision unchanged', out === original);
 }
 
-// g) tools: factory default is interception
+// g) tools: factory default is interception, through the registry view
 {
   const w = makeWorld({ presetId: 'chatonly' });
-  const tools = await w.tools();
-  check('g: chatonly, no state file -> tools omitted from the request', tools === undefined, JSON.stringify(tools));
-  check('g2: no state file is created just by assembling', !fs.existsSync(w.toolsStateFile), w.toolsStateFile);
+  const list = w.tools();
+  check('g: chatonly, no state file -> tools omitted from the request', list === undefined, JSON.stringify(list));
+  check('g2: no state file is created just by reading the switch', !fs.existsSync(w.toolsStateFile), w.toolsStateFile);
+  check('g3: the restriction sits on the AGENT layer, not the preset layer',
+    w.registry.restrictionCount(w.agent) === 1 && w.registry.restrictionCount(w.presetScope) === 0);
 }
 
-// h) tools: the switch off hands the list back to everyone else
+// h) tools: the switch off hands every tool back
 {
-  const otherAdds = (assembly) => ({ ...assembly, tools: [...assembly.tools, { name: 'other_plugin_tool' }] });
   const file = tmpState();
   fs.writeFileSync(file, 'pass\n', 'utf8');
-  const w = makeWorld({ presetId: 'chatonly', toolsStateFile: file, extraToolProvider: otherAdds });
-  const tools = await w.tools();
-  check('h: switch off -> tools survive, other plugin keeps control', Array.isArray(tools) && tools.length === BASE_TOOLS.length + 1, JSON.stringify(tools?.map((t) => t.name)));
-  check('h2: the other plugin\'s addition is present', tools?.some((t) => t.name === 'other_plugin_tool'));
+  const w = makeWorld({ presetId: 'chatonly', toolsStateFile: file });
+  const list = w.tools();
+  check('h: switch off -> global + preset tools all survive', Array.isArray(list) && list.length === BASE_TOOLS.length + PRESET_TOOLS.length, JSON.stringify(list?.map((t) => t.name)));
+  check('h2: the preset tool-web row is visible when passing', list?.some((t) => t.name === 'web_search') === true);
 
   const w2 = makeWorld({ presetId: 'standard', toolsStateFile: file });
-  const tools2 = await w2.tools();
-  check('h3: other preset still untouched with the switch off', Array.isArray(tools2) && tools2.length === BASE_TOOLS.length);
+  const list2 = w2.tools();
+  check('h3: other preset untouched, and it carries no web row', Array.isArray(list2) && list2.length === BASE_TOOLS.length);
 }
 
-// i) tools: `/chattools` flips the switch live, no restart
+// i) tools: `/filtertools` flips the switch live, no restart
 {
   const w = makeWorld({ presetId: 'chatonly' });
-  const cmd = w.command('chattools');
-  check('i: /chattools is registered', typeof cmd?.handler === 'function');
+  const cmd = w.command('filtertools');
+  check('i: /filtertools is registered', typeof cmd?.handler === 'function');
   const call = (raw) => cmd.handler({ rawInput: raw });
 
   check('i2: default state reads as intercept', (await call('')).text.includes('拦截工具'));
   const off = await call('off');
-  check('i3: `/chattools off` succeeds', off.kind === 'success' && off.text.includes('放行'), off.text);
-  check('i4: next assembly passes tools through', (await w.tools())?.length === BASE_TOOLS.length);
+  check('i3: `/filtertools off` succeeds', off.kind === 'success' && off.text.includes('放行'), off.text);
+  check('i4: the very next message carries every tool again', w.tools()?.length === BASE_TOOLS.length + PRESET_TOOLS.length);
 
   const on = await call('on');
-  check('i5: `/chattools on` restores interception', on.kind === 'success' && (await w.tools()) === undefined, on.text);
+  check('i5: `/filtertools on` masks them again on the next message', on.kind === 'success' && w.tools() === undefined, on.text);
 
   const bogus = await call('maybe');
-  check('i6: unknown argument is rejected, switch untouched', bogus.kind === 'error' && (await w.tools()) === undefined, bogus.text);
+  check('i6: unknown argument is rejected, switch untouched', bogus.kind === 'error' && w.tools() === undefined, bogus.text);
 
   const reset = await call('reset');
-  check('i7: `reset` deletes the file and falls back to the default', reset.kind === 'success' && (await w.tools()) === undefined);
+  check('i7: `reset` deletes the file and falls back to the default', reset.kind === 'success' && w.tools() === undefined);
 }
 
 // j) tools: `stripTools: false` is the factory default, not a hard opt-out
 {
   const w = makeWorld({ presetId: 'chatonly', stripTools: false });
-  check('j: stripTools:false -> nothing stripped before any toggle', (await w.tools())?.length === BASE_TOOLS.length);
-  await w.command('chattools').handler({ rawInput: 'on' });
-  check('j2: /chattools on still works over that default', (await w.tools()) === undefined);
+  check('j: stripTools:false -> nothing masked before any toggle', w.tools()?.length === BASE_TOOLS.length + PRESET_TOOLS.length);
+  await w.command('filtertools').handler({ rawInput: 'on' });
+  check('j2: /filtertools on still works over that default', w.tools() === undefined);
+}
+
+// k) the restriction masks inherited tools only — a scope-owned one survives
+{
+  const w = makeWorld({ presetId: 'chatonly', agentToolNames: ['local_tool'] });
+  const list = w.tools();
+  check('k: a tool registered in the agent scope is exempt from restrict()',
+    list?.length === 1 && list[0].name === 'local_tool', JSON.stringify(list?.map((t) => t.name)));
+}
+
+// l) on/off cycles reuse ONE scope plugin and never stack restrictions
+{
+  const w = makeWorld({ presetId: 'chatonly' });
+  const call = (raw) => w.command('filtertools').handler({ rawInput: raw });
+  w.tools();
+  await call('off'); w.tools();
+  await call('on'); w.tools();
+  await call('off'); w.tools();
+  await call('on'); w.tools();
+  check('l: the scope plugin is mounted exactly once', w.mounts.plugin === 1, JSON.stringify(w.mounts));
+  check('l2: exactly one restriction is live', w.registry.restrictionCount(w.agent) === 1);
+}
+
+// m) a resumed step with no claimed message still reconciles (one step late)
+{
+  const file = tmpState();
+  fs.writeFileSync(file, 'pass\n', 'utf8');
+  const w = makeWorld({ presetId: 'chatonly', toolsStateFile: file });
+  w.tools();                                        // off: nothing armed
+  fs.writeFileSync(file, 'strip\n', 'utf8');        // flip while the agent is idle
+  await w.preStep();                                // fallback path, no new message
+  check('m: the pre-step fallback still arms the restriction', w.registry.restrictionCount(w.agent) === 1);
+}
+
+// n) no agent.ctx.plugin: degrade to "no restriction", never crash
+{
+  const w = makeWorld({ presetId: 'chatonly', hasScopedPrompt: false });
+  const list = w.tools();
+  check('n: missing agent.ctx.plugin degrades to a full tool list', list?.length === BASE_TOOLS.length + PRESET_TOOLS.length, JSON.stringify(list?.map((t) => t.name)));
+}
+
+// p) switching the session to another preset lifts the mask
+{
+  const w = makeWorld({ presetId: 'chatonly' });
+  w.tools();
+  const before = w.registry.restrictionCount(w.agent);
+  w.switchPreset('standard');
+  const list = w.tools();
+  check('p: preset switch removes the restriction on the next message',
+    before === 1 && w.registry.restrictionCount(w.agent) === 0, JSON.stringify({ before, after: w.registry.restrictionCount(w.agent) }));
+  check('p2: and the tools come back', list?.length === BASE_TOOLS.length + PRESET_TOOLS.length);
+}
+
+// o) other presets never mount the plugin
+{
+  const w = makeWorld({ presetId: 'standard', suppressed: false });
+  w.tools();
+  check('o: other preset never mounts the restriction plugin', w.mounts.plugin === 0, JSON.stringify(w.mounts));
 }
 
 console.log(failures === 0 ? '\nALL TESTS PASSED' : `\n${failures} FAILURES`);

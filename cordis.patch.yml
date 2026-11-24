@@ -5,12 +5,13 @@
 # index.js with role `policy`:
 #   - shadows the required `working-directory:current` contribution, so the
 #     runtime-context snapshot never reaches the request or the session log;
-#   - clears `assembly.tools`, because global tool providers are collected for
-#     every preset and a preset row cannot remove them. That interception is a
-#     LIVE switch, not this file: `stripTools` is only the factory default, the
-#     current value lives in `toolsStateFile` and is flipped with
-#     `/chattools on|off`. With the switch off the assembly is passed through
-#     untouched, so other plugins own the tool list again;
+#   - masks every tool for that preset's agents at the registry view
+#     (`ctx.tools.restrict({ allow: [] })` in the agent scope), so nothing is
+#     collected into the request. That interception is a LIVE switch, not this
+#     file: `stripTools` is only the factory default, the current value lives in
+#     `toolsStateFile` and is flipped with `/filtertools on|off`. With the switch
+#     off no restriction is installed and every other plugin's tools are visible
+#     again;
 #   - registers `/chatprompt`, the composer-side editor for the prompt file.
 #
 # Row 2 (`preset-chat`) defines the preset. Its `plugins` list mounts THIS
@@ -18,6 +19,11 @@
 # slot (complete: true) and reads its text from
 # `~/.dsh/chatonly-system-prompt.md` on every assembly — edit the file (or send
 # `/chatprompt …`) and the next message uses it. No restart.
+#
+# It also declares the `tool-web` row, so ChatOnly owns its own web tools. They
+# live in the PRESET scope, which is the agent scope's parent: the restriction
+# above therefore hides them too (only a tool registered in the agent's own
+# scope would be exempt).
 #
 # Do NOT add a `dsh-persona` row next to it: one section name may be registered
 # once per scope.
@@ -31,7 +37,7 @@
         role: 'policy'
         presetId: 'chatonly'
         contextName: 'working-directory:current'
-        stripTools: true                                   # 出厂默认；运行中用 /chattools 切
+        stripTools: true                                   # 出厂默认；运行中用 /filtertools 切
         toolsStateFile: '~/.dsh/chatonly-strip-tools.state' # 当前开关值（strip/pass），缺省即默认
         file: '~/.dsh/chatonly-system-prompt.md'
     - id: preset-chat
@@ -39,7 +45,7 @@
       config:
         id: chatonly
         name: ChatOnly
-        description: '纯对话：默认不注入工具与工作区上下文；系统提示词来自 ~/.dsh/chatonly-system-prompt.md（留空则仅发送用户输入）；/chattools 可放行工具'
+        description: '纯对话：默认不注入工具与工作区上下文；系统提示词来自 ~/.dsh/chatonly-system-prompt.md（留空则仅发送用户输入）；/filtertools 可放行工具'
         order: 5
         plugins:
           - id: prompt
@@ -47,3 +53,8 @@
             config:
               role: 'section'
               file: '~/.dsh/chatonly-system-prompt.md'
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000

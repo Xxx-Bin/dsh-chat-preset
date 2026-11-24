@@ -1,8 +1,8 @@
 {
   "name": "dsh-chat-preset",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": false,
-  "description": "DSH 的纯净对话预设 ChatOnly：拦截工具注入与工作区上下文，模型只收到你输入的内容；/chatprompt 设定系统提示词，/chattools 可关闭工具拦截。",
+  "description": "DSH 的纯净对话预设 ChatOnly：拦截工具注入与工作区上下文，模型只收到你输入的内容；/chatprompt 设定系统提示词，/filtertools 可关闭工具拦截。",
   "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "cordis", "agent-preset", "chatonly", "system-prompt", "runtime-context", "tools", "toggle"],
   "license": "MIT",
   "engines": { "node": ">=18" },

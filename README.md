@@ -103,26 +103,32 @@ dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
 
 > 该命令全局注册，可在任意预设下调用，但仅影响 ChatOnly；在其它预设下修改不会生效，亦无提示。
 
-### 工具抑制开关：`/chattools`
+### 工具抑制开关：`/filtertools`
 
 默认抑制，即请求不携带任何工具 schema。
 
 | 命令 | 行为 |
 |---|---|
-| `/chattools` 或 `/chattools status` | 输出当前模式与状态文件路径 |
-| `/chattools on` | 抑制工具注入 |
-| `/chattools off` | 放行，`assembly.tools` 原样传递 |
-| `/chattools reset` | 删除状态文件，回退出厂默认 |
+| `/filtertools` 或 `/filtertools status` | 输出当前模式与状态文件路径 |
+| `/filtertools on` | 抑制工具注入 |
+| `/filtertools off` | 放行：不安装任何限制，全部工具可见 |
+| `/filtertools reset` | 删除状态文件，回退出厂默认 |
 
-状态存于 `~/.dsh/chatonly-strip-tools.state`，内容为 `strip` 或 `pass`。每次装配重新读取，切换后下一条消息生效；文件不存在时采用 `config.stripTools`。参数接受 `on`／`strip`／`intercept`／`block`／`true`／`1` 与 `off`／`pass`／`allow`／`bypass`／`false`／`0` 两组同义词，无法识别时返回错误且不改变状态。
+状态存于 `~/.dsh/chatonly-strip-tools.state`，内容为 `strip` 或 `pass`。每次出步前重新读取，切换后**下一条消息**即生效（不是下一条会话）；文件不存在时采用 `config.stripTools`。参数接受 `on`／`strip`／`intercept`／`block`／`true`／`1` 与 `off`／`pass`／`allow`／`bypass`／`false`／`0` 两组同义词，无法识别时返回错误且不改变状态。
 
-放行状态下，本包原样返回下游装配结果，其它插件的工具追加与过滤逻辑均按原有顺序生效。本包不提供工具，仅在抑制状态下清空列表。
+抑制不是"清空请求里的 tools"。`assemble()` 在跑完 `system-prompt/assemble` 瀑布之后才把 provider 收集的工具列表挂上去（`{ ...transformed, tools }`），所以瀑布层看不到、也改不动 `tools`。本包在更早的一层下手：`ctx.tools.restrict({ allow: [] })` 把限制记进 agent 作用域，`view(scope)` 计算可见性时所有继承工具都过不了 `admits()`，于是它们根本没被收集。
+
+限制只作用于**该 agent**，且只覆盖继承来的工具（全局 + 预设层）。agent 自己作用域里注册的工具不受影响 —— ChatOnly 不注册任何工具，因此抑制态是真的"零工具"。
 
 > 该命令全局注册且作用于所有 ChatOnly 会话：状态是单一文件，不按会话或 agent 区分。
 
+#### 为什么不在装配瀑布里清空
+
+旧实现监听 `system-prompt/assemble` 并返回 `{ ...out, tools: [] }`。在 0.2.2-rc.5 上这不可能生效：`SystemPrompt.assemble()` 构造的 assembly 只有 `{ sections, contexts, variables }`，瀑布拿到的 `out.tools` 恒为 `undefined`；即便强行写入，函数末尾的 `{ ...transformed, tools }` 也会用 provider 收集的原列表覆盖回去。本机实测：`strip-tools` 调试事件在 2026-11-02 之后归零，而同期每次 ChatOnly 请求头仍带 1–41 个工具。
+
 #### 两种抑制相互独立
 
-`/chattools off` 仅放行工具。`working-directory:current` 在该会话中仍为空，模型不获得工作目录及其它环境信息。
+`/filtertools off` 仅放行工具。`working-directory:current` 在该会话中仍为空，模型不获得工作目录及其它环境信息。
 
 若启用文件类工具而未提供工作目录，模型缺少定位依据，评测结果将混入环境缺失的影响。因此放行工具时应同时满足两项条件：
 
@@ -135,7 +141,7 @@ dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
 
 | role | 挂载位置 | 职责 |
 |---|---|---|
-| `policy`（默认） | 全局 | 抑制工作目录注入、按开关抑制工具、注册 `/chatprompt` 与 `/chattools` |
+| `policy`（默认） | 全局 | 抑制工作目录注入、按开关抑制工具、注册 `/chatprompt` 与 `/filtertools` |
 | `section` | ChatOnly 预设 agent 的 `plugins` | 占用 persona 槽位，从文件读取系统提示词 |
 
 ```yaml
@@ -147,7 +153,7 @@ dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
         role: 'policy'
         presetId: 'chatonly'                      # 须与预设行的 config.id 一致
         contextName: 'working-directory:current'  # 被覆盖的 contribution 名
-        stripTools: true                          # 出厂默认；运行期由 /chattools 切换
+        stripTools: true                          # 出厂默认；运行期由 /filtertools 切换
         toolsStateFile: '~/.dsh/chatonly-strip-tools.state'
         file: '~/.dsh/chatonly-system-prompt.md'  # /chatprompt 写入目标
 
@@ -164,15 +170,20 @@ dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
             config:
               role: 'section'
               file: '~/.dsh/chatonly-system-prompt.md'  # 装配读取来源
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'          # 预设作用域的 web 工具；放行时才可见
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
 ```
 
 **`presetId` 必须与预设行的 `config.id` 一致。** 两者不同时，`policy` 行不会作用于该预设，注入照常存在。
 
 **两处 `file` 必须一致。** 写入与读取路径不同时，`/chatprompt` 会报告保存成功而系统提示词从未生效。
 
-**`toolsStateFile` 不得与 `file` 指向同一路径。** 开关文件按单行关键字解析，读到提示词全文时识别失败并永久回退出厂默认；反向更糟，`/chattools on|off` 会把提示词覆盖成一行 `strip`／`pass`。
+**`toolsStateFile` 不得与 `file` 指向同一路径。** 开关文件按单行关键字解析，读到提示词全文时识别失败并永久回退出厂默认；反向更糟，`/filtertools on|off` 会把提示词覆盖成一行 `strip`／`pass`。
 
-**`stripTools` 是出厂默认值，不是总开关。** 状态文件存在时以其为准；设为 `false` 不会禁用 `/chattools`，仅改变未切换时的默认行为。需要彻底禁用抑制行为时应卸载本包。
+**`stripTools` 是出厂默认值，不是总开关。** 状态文件存在时以其为准；设为 `false` 不会禁用 `/filtertools`，仅改变未切换时的默认行为。需要彻底禁用抑制行为时应卸载本包。
 
 ## 兼容性与脆弱性
 
@@ -182,6 +193,8 @@ dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
 |---|---|
 | agent 作用域同名 context 覆盖全局同名 context | shadow 不生效，工作目录消息恢复 |
 | `required: false` + `text: ''` 使 contribution 被过滤、投影返回 `undefined` | 空字符串被视为内容，请求中多出一条空 `runtime-context` |
+| `tools.restrict()` 只接受 scoped context，且 `admits()` 在 `view(scope)` 计算 | `restrict` 直接抛错 → 抑制静默失效，请求恢复携带工具 |
+| `agent/inbox/claimed` 在 `tools.resolve()` / `assemble()` 之前触发 | 开关翻转后的第一条消息仍按旧状态装配，第二条才生效 |
 | `buildRequest()` 在 `tools` 为空时省略该键 | 该键变为 `tools: []`，多数模型 API 会拒绝 |
 
 失效时无报错、无异常，仅退回默认形态。升级 dsh 后应依次确认：bundles 仍然登记（见[排障](#确认生效)第 1 条）；新建 ChatOnly 会话的请求中不存在 `tools` 键。
@@ -193,9 +206,10 @@ dsh plugin --profile web add -w https://github.com/Xxx-Bin/dsh-chat-preset
 1. **无上下文压缩。** 未挂载压缩插件，不支持自动压缩与 `/compact`。对话超出模型上下文窗口时请求直接失败。
 2. **与 `dsh-prompt-setting` 的「我的 Prompt」互斥。** `complete: true` 会覆盖同作用域内的其它段（参见该项目 `core/experiments.js` E3），两者不可共存。
 3. **同一作用域内同名 section 只能注册一次。** 预设内不应再挂载 `dsh-persona`，否则抛错。
-4. **会话内切换预设不撤销工作目录抑制。** shadow 在 agent 作用域一次性注册且无卸载路径。由 ChatOnly 切换至其它预设后，该会话的 `working-directory:current` 仍为空，直至新建会话。
+4. **会话内切换预设不撤销工作目录抑制。** shadow 在 agent 作用域一次性注册且无卸载路径。由 ChatOnly 切换至其它预设后，该会话的 `working-directory:current` 仍为空，直至新建会话。工具限制则在切换后的下一次出步时自动解除，两者行为不对称。
 5. **旧会话不追溯。** 修复前已落库的工作目录消息仍然存在；此类会话下次对话会多出一条一次性的 `Current runtime context: none.`。
-6. **工具开关为全局状态。** 其值为单一文件，`/chattools off` 对所有已打开的 ChatOnly 会话同时生效。工作目录抑制则按 agent 注册且不可撤销。两者机制不同，行为不对称。
+6. **工具开关为全局状态。** 其值为单一文件，每次出步前对账，`/filtertools off` 对所有已打开的 ChatOnly 会话同时生效。工作目录抑制则按 agent 注册且不可撤销。两者机制不同，行为不对称。
+7. **agent 自己作用域里注册的工具不受抑制。** `restrict()` 只过滤继承来的工具（`view()` 对 viewing scope 自身的注册直接放行）。ChatOnly 不注册工具，故当前不受影响；若日后有插件往某个 ChatOnly agent 的作用域里直接注册工具，那些工具会漏出来。
 
 ## 卸载与清理
 
@@ -216,15 +230,15 @@ rm ~/.dsh-filter-rtc-debug.log
 
 `dsh plugin remove`（或桌面端插件页的卸载）**不会**动上面第 2–4 项。它的流程是：从 `dsh.profile.bundles` 摘除 → 卸载运行期 contribution → `pnpm remove` → 重新解析。插件 API 没有卸载钩子，流程也不扫描插件写过哪些文件，因此这几步只能手动执行。
 
-不清理不算残留故障：卸载会 dispose 全部运行期注册（命令、section、监听器、shadow），行为当场回到默认；上述文件此后无人读取，只是留在主目录。唯一的真实影响是**重装沿用旧开关** —— `chatonly-strip-tools.state` 仍在时 `/chattools` 不回出厂默认，而是上次写入的 `strip`／`pass`；要拿到干净初值，先执行 `/chattools reset`。
+不清理不算残留故障：卸载会 dispose 全部运行期注册（命令、section、监听器、shadow），行为当场回到默认；上述文件此后无人读取，只是留在主目录。唯一的真实影响是**重装沿用旧开关** —— `chatonly-strip-tools.state` 仍在时 `/filtertools` 不回出厂默认，而是上次写入的 `strip`／`pass`；要拿到干净初值，先执行 `/filtertools reset`。
 
 Windows 下 `rm` 不可用：PowerShell 用 `Remove-Item`，cmd 用 `del`。
 
 ### 调试日志
 
-`index.js` 向 `~/.dsh-filter-rtc-debug.log` 同步追加 JSON 行，记录每次装配、每次工具剥离、每次模式切换与每次 shadow 注册。日志无大小上限与轮转机制，长期使用会持续增长。
+`index.js` 向 `~/.dsh-filter-rtc-debug.log` 同步追加 JSON 行，记录安装、每次 shadow 注册、每次限制挂载/解除，以及能力缺失时的 `miss`。日志无大小上限与轮转机制，长期使用会持续增长。
 
-`{"evt":"strip-tools","count":9,...}` 为抑制生效的记录，可按 `sessionId` 核对具体会话。该日志为调试期脚手架，删除后会在下次触发时重建。
+`{"evt":"restrict-tools","mode":"on",...}` 为限制已挂上的记录，`mode":"off"` 为已解除，可按 `sessionId` 核对具体会话。该日志为调试期脚手架，删除后会在下次触发时重建。
 
 ## 确认生效
 
@@ -252,7 +266,7 @@ dsh plugin --profile desktop ls | findstr dsh-chat-preset
 | 第 1 步输出 | 结论 |
 |---|---|
 | `dep: <未安装>` | 依赖未写入，重新安装 |
-| `dep: ^1.2.0` + `bundles: 未登记` | 已安装但未进入 layer stack，手动补充 `dsh.profile.bundles` |
+| `dep: ^1.3.0` + `bundles: 未登记` | 已安装但未进入 layer stack，手动补充 `dsh.profile.bundles` |
 | 两项均正常，但 ChatOnly 不在预设列表 | 未重启，或重启的 profile 不符 |
 
 > `dsh --profile desktop --dump-config` 会报 *profile "desktop" is managed exclusively by the Electron application*。桌面端 profile 不允许 CLI 渲染配置树；如需检查合成结果，可在 CLI 管理的 profile（`web` / `headless`）中安装一次。
@@ -263,7 +277,7 @@ dsh plugin --profile desktop ls | findstr dsh-chat-preset
 node test.mjs
 ```
 
-25 项测试，全部通过。基于 `@deepseek-ai/dsh-system-prompt` 与 `agent-loop step()` 的等价模型，覆盖作用域隔离、预设判定、幂等性、能力缺失时的降级、工具瀑布的两种模式（抑制清空／放行后其它插件的增删可见）以及 `/chattools` 的切换语义。仅依赖 `node:` 内置模块。
+34 项测试，全部通过。基于 `@deepseek-ai/dsh-system-prompt`、`dsh-tools` 的 `view(scope)`/`restrict()` 与 `agent-loop preStep()` 调用顺序的等价模型，覆盖作用域隔离、预设判定、幂等性、能力缺失时的降级、限制落在 agent 层而非预设层、own 注册豁免、预设层 `tool-web` 在抑制/放行下的可见性、插件只挂一次、claim 与 pre-step 两条对账路径，以及 `/filtertools` 的切换语义。仅依赖 `node:` 内置模块。
 
 测试使用等价装配模型而非 DSH 本体；真实链路仍以新建 ChatOnly 会话检查请求为准。
 

@@ -60,27 +60,52 @@
  * `Current runtime context: none.` marker (retained -> CLEARED). New chatonly
  * sessions never see it.
  *
- * Tools (switch: `/chattools`, factory default = intercept)
+ * Tools (switch: `/filtertools`, factory default = intercept)
  * ---------------------------------------------------------
- * A preset row cannot remove tools: `assemble()` collects every GLOBAL tool
- * provider unconditionally (`dsh-system-prompt`:364-365) and there is no
- * `suppressTools()` counterpart to `suppressRuntimeContext()`. With tools
- * registered by the desktop bundles (acp_*, sidebar_open, working_directory,
- * search_context, …) a ChatOnly request therefore still carried 10 tool
- * schemas. The assembly waterfall fixes it: `buildRequest(…, assembly.tools, …)`
- * emits `{ tools }` only when the list is non-empty (`dsh-agent-loop`:1217-1220),
- * so clearing `assembly.tools` means the model is offered no tools at all.
+ * Tools are hidden one layer earlier than the request: in the registry view.
+ *
+ * The assembly waterfall CANNOT do it. `SystemPrompt.assemble()` builds its
+ * assembly from `{ sections, contexts, variables }` only
+ * (`dsh-system-prompt/lib/index.js:396-400`), runs the
+ * `system-prompt/assemble` waterfall over THAT object (`:401`), and attaches
+ * the provider-collected tool list only afterwards (`{ ...transformed, tools }`,
+ * `:404`/`:409`). A waterfall listener therefore sees `out.tools === undefined`
+ * — and even one returning `{ tools: [] }` would be overwritten by the same
+ * spread. On this machine the `strip-tools` debug events stop on 2026-11-02
+ * while every later ChatOnly request header still carries 1–41 tools.
+ *
+ * `dsh-tools` decides visibility in `view(scope)` (`dsh-tools/lib/index.js:477`,
+ * `admits()` at `:392`), and `assemble()` reads exactly that view through its
+ * `systemPrompt.tools` provider (`dsh-tools:418` → `definitions` → `:580`).
+ * `ctx.tools.restrict({ allow: [] })` (`:453`) records one restriction in the
+ * CALLING scope's layer; every inherited tool then fails `admits()`, so nothing
+ * reaches the request. The scope's own registrations stay exempt (`:497`) —
+ * ChatOnly registers none, so the result is a genuinely empty tool list.
+ *
+ * `restrict()` rejects an unscoped context (`:455`), so it is called from a tiny
+ * plugin mounted into the agent scope — the same pattern as the context shadow,
+ * for the same reason: the agent scope fiber declares no `tools` dependency, so
+ * a bare `agent.ctx.tools` throws "without inject". The plugin is mounted ONCE
+ * per agent and keeps its `apply(c)` context; an off/on cycle only calls the
+ * disposer and re-arms through that same context, so no fiber accumulates.
+ *
+ * Timing — the restriction must land BEFORE the step assembles. `dsh-agent-loop`
+ * runs `inbox.claim()` (`:683`, which emits `agent/inbox/claimed`) →
+ * `tools.resolve()` (`:686`) → `systemPrompt.assemble()` (`:692`) →
+ * `agent/pre-step` waterfall (`:698`). So the `agent/inbox/claimed` listener
+ * toggles within the same message; the `agent/pre-step` listener is a fallback
+ * for a resumed step that claims no new message (it lands one step late there).
  *
  * Interception is a live switch, not a build-time config:
  *   - `~/.dsh/chatonly-strip-tools.state` — one word (`strip` / `pass`), read on
- *     every assembly and written by `/chattools on|off`. Missing = the factory
+ *     every step and written by `/filtertools on|off`. Missing = the factory
  *     default, `config.stripTools` (true).
- *   - With the switch OFF the listener returns the downstream assembly verbatim,
- *     so any other plugin's tool provider or filter behaves exactly as it would
- *     without this package installed. That is the "let someone else manage it"
- *     mode — this package never adds tools of its own, it only clears the list.
+ *   - With the switch OFF no restriction is installed, so any other plugin's
+ *     tool registration behaves exactly as it would without this package. That
+ *     is the "let someone else manage it" mode — this package never adds tools
+ *     of its own, it only masks them for this preset's agents.
  *   - `config.stripTools: false` therefore means "ship turned off", not "toggle
- *     disabled": `/chattools on` can still turn interception on later.
+ *     disabled": `/filtertools on` can still turn interception on later.
  *
  * @module dsh-chat-preset
  */
@@ -116,10 +141,10 @@ const DEFAULT_PRESET_ID = 'chatonly';
 /**
  * The tool-interception switch. One line of text; absent/empty = factory default
  * (`config.stripTools`, itself defaulting to true). Read on every assembly, so
- * `/chattools off` applies to the next message — no restart.
+ * `/filtertools off` applies to the next message — no restart.
  */
 const DEFAULT_TOOLS_STATE_FILE = '~/.dsh/chatonly-strip-tools.state';
-/** Accepted spellings in the state file / `/chattools` argument. */
+/** Accepted spellings in the state file / `/filtertools` argument. */
 const SWITCH_ON = new Set(['on', 'strip', 'intercept', 'block', 'true', '1']);
 const SWITCH_OFF = new Set(['off', 'pass', 'allow', 'bypass', 'false', '0']);
 /** The working-directory contribution owned by `dsh-working-directory`. */
@@ -136,16 +161,99 @@ function applyPolicy(ctx, config = {}) {
   const presetId = config.presetId ?? DEFAULT_PRESET_ID;
   const contextName = config.contextName ?? DEFAULT_CONTEXT_NAME;
   const toolsStateFile = expandHome(config.toolsStateFile ?? DEFAULT_TOOLS_STATE_FILE);
-  /** Factory default for the switch; the state file (see `/chattools`) overrides it. */
+  /** Factory default for the switch; the state file (see `/filtertools`) overrides it. */
   const stripToolsDefault = config.stripTools ?? true;
   /** Agents whose shadow contribution is already installed (per agent, never reused). */
   const installed = new WeakSet();
-  /** Last observed switch value, so diagnostics fire on flips instead of per step. */
-  let lastStrip;
+  /** Agents whose restriction plugin is already mounted (mounted at most once). */
+  const plugged = new WeakSet();
+  /** agent -> the `apply(c)` context the restriction is armed through. */
+  const scopedTools = new WeakMap();
+  /** agent -> `{ restore }`; `restore` is set only while a restriction is in force. */
+  const armed = new WeakMap();
 
   const stripToolsNow = () => readSwitch(toolsStateFile, stripToolsDefault);
+  const sessionOf = (agent) => agent?.session?.id ?? null;
+
+  /**
+   * Reconcile one agent's restriction with the live switch. Idempotent: only a
+   * real state change touches the registry, so calling it on every step is free.
+   */
+  function syncTools(agent) {
+    try {
+      if (agent === undefined || agent === null) return;
+      // A session that switched to another preset must lose the mask too: the
+      // restriction lives on the agent scope and nothing else would remove it.
+      if (readPresetId(ctx, agent) !== presetId) { lift(agent); return; }
+      const want = stripToolsNow();
+      const running = armed.get(agent)?.restore !== undefined;
+      if (want === running) return;
+      if (want) arm(agent);
+      else lift(agent);
+    } catch (error) {
+      dbg({ evt: 'error', stage: 'sync-tools', message: String(error), sessionId: sessionOf(agent) });
+    }
+  }
+
+  /** Install `restrict({ allow: [] })`; mounts the scope plugin on first use. */
+  function arm(agent) {
+    if (armed.get(agent)?.restore !== undefined) return;
+    const scope = scopedTools.get(agent);
+    if (scope === undefined || typeof scope.tools?.restrict !== 'function') {
+      mountScope(agent); // apply(c) re-enters syncTools once the context exists
+      return;
+    }
+    const restore = scope.tools.restrict({ allow: [] });
+    armed.set(agent, { restore });
+    dbg({ evt: 'restrict-tools', mode: 'on', sessionId: sessionOf(agent), agentId: agent?.id ?? null });
+  }
+
+  /** Drop the restriction; the scope plugin stays mounted for the next `on`. */
+  function lift(agent) {
+    const current = armed.get(agent);
+    if (current?.restore === undefined) return;
+    current.restore();
+    armed.set(agent, {});
+    dbg({ evt: 'restrict-tools', mode: 'off', sessionId: sessionOf(agent), agentId: agent?.id ?? null });
+  }
+
+  /**
+   * Mount the restriction plugin in the agent scope — exactly once per agent.
+   * `tools` must be declared HERE: the agent scope fiber declares no such
+   * dependency, so a bare `agent.ctx.tools` throws "without inject" (the same
+   * reason the context shadow mounts a plugin instead of registering directly).
+   */
+  function mountScope(agent) {
+    if (plugged.has(agent)) return;
+    const scopeCtx = agent?.ctx;
+    if (typeof scopeCtx?.plugin !== 'function') {
+      dbg({ evt: 'miss', reason: 'agent.ctx has no plugin()', sessionId: sessionOf(agent) });
+      return;
+    }
+    plugged.add(agent);
+    try {
+      scopeCtx.plugin({
+        name: 'chat-preset:tool-restriction',
+        inject: ['tools'],
+        apply(c) {
+          scopedTools.set(agent, c);
+          syncTools(agent);
+        },
+      });
+    } catch (error) {
+      plugged.delete(agent); // a failed mount must stay retryable
+      throw error;
+    }
+  }
 
   dbg({ evt: 'applied', presetId, contextName, stripTools: stripToolsNow(), toolsStateFile, pid: process.pid });
+
+  // `inbox.claim()` emits this BEFORE `tools.resolve()` / `assemble()`
+  // (dsh-agent-loop/lib/index.js:683 -> :686 -> :692), so a switch flipped
+  // between two messages is in force for the very next one.
+  ctx.on('agent/inbox/claimed', (payload) => {
+    syncTools(payload?.agent);
+  });
 
   ctx.on('agent/pre-step', (payload, next) => {
     const agent = payload?.agent;
@@ -160,52 +268,17 @@ function applyPolicy(ctx, config = {}) {
         suppress(agent, contextName, installed);
       }
     } catch (error) {
-      dbg({ evt: 'error', message: String(error), sessionId: agent?.session?.id ?? null });
+      dbg({ evt: 'error', message: String(error), sessionId: sessionOf(agent) });
     }
 
-    // 3) The decision is returned untouched: the snapshot is not a message we
+    // 3) FALLBACK ONLY: this waterfall runs after the step's assembly
+    //    (:698 vs :692), so a change first noticed here lands one step late.
+    //    The claimed listener above covers every new message.
+    syncTools(agent);
+
+    // 4) The decision is returned untouched: the snapshot is not a message we
     //    can filter, it is a projection `step()` recomputes (see header).
     return next();
-  });
-
-  // --- tools -----------------------------------------------------------------
-  // `assemble()` collects every GLOBAL tool provider unconditionally
-  // (dsh-system-prompt/lib/index.js:365) and a preset's scoped layer can only
-  // add, never remove — so a preset row cannot drop tools. The assembly
-  // waterfall is the one place that can: `buildRequest(..., assembly.tools, ...)`
-  // omits `tools` entirely when the list is empty.
-  //
-  // The listener is ALWAYS registered, even when the switch is off: that is what
-  // makes `/chattools off|on` a live toggle. With the switch off the assembly is
-  // returned verbatim, so every other plugin's tool provider / filter keeps
-  // working exactly as it would without this package.
-  ctx.on('system-prompt/assemble', async (assembly, context, next) => {
-    const out = await next();
-    try {
-      const agent = context?.agent;
-      if (agent === undefined || agent === null) return out;
-      if (readPresetId(ctx, agent) !== presetId) return out;
-
-      const strip = stripToolsNow();
-      if (strip !== lastStrip) {
-        lastStrip = strip;
-        dbg({ evt: 'tools-mode', strip, file: toolsStateFile, sessionId: agent?.session?.id ?? null });
-      }
-      if (!strip) return out; // pass-through: other plugins own the tool list
-
-      const tools = out?.tools;
-      if (!Array.isArray(tools) || tools.length === 0) return out;
-      dbg({
-        evt: 'strip-tools',
-        count: tools.length,
-        names: tools.map((tool) => tool?.name).slice(0, 20),
-        sessionId: agent?.session?.id ?? null,
-      });
-      return { ...out, tools: [] };
-    } catch (error) {
-      dbg({ evt: 'error', stage: 'strip-tools', message: String(error) });
-      return out;
-    }
   });
 
   registerToolsCommand(ctx, toolsStateFile, stripToolsDefault);
@@ -243,19 +316,19 @@ function describeSwitch(strip, file) {
 }
 
 /**
- * `/chattools [on | off | status | reset]` — the live switch for tool
- * interception. Writing the file is enough: the assembly listener re-reads it on
- * the next request.
+ * `/filtertools [on | off | status | reset]` — the live switch for tool
+ * interception. Writing the file is enough: the claim / pre-step listeners
+ * re-read it before the next step, so no restart and no re-mount.
  */
 function registerToolsCommand(ctx, file, fallback) {
   ctx.effect(() => ctx.commands.register({
-    name: 'chattools',
+    name: 'filtertools',
     description: '切换 ChatOnly 是否拦截工具（默认拦截；关闭后由其他插件管理工具）',
     input: { hint: 'on | off | status | reset' },
     handler: async (invocation) => {
       const arg = String(invocation?.rawInput ?? '').trim().toLowerCase();
       if (arg.length === 0 || arg === 'status') {
-        return { kind: 'success', text: `${describeSwitch(readSwitch(file, fallback), file)}\n用法：/chattools on | off | reset` };
+        return { kind: 'success', text: `${describeSwitch(readSwitch(file, fallback), file)}\n用法：/filtertools on | off | reset` };
       }
       if (arg === 'reset') {
         try {
@@ -268,7 +341,7 @@ function registerToolsCommand(ctx, file, fallback) {
       let value;
       if (SWITCH_ON.has(arg)) value = true;
       else if (SWITCH_OFF.has(arg)) value = false;
-      else return { kind: 'error', text: `不认识的参数「${arg}」。用法：/chattools on | off | status | reset` };
+      else return { kind: 'error', text: `不认识的参数「${arg}」。用法：/filtertools on | off | status | reset` };
 
       try {
         fs.mkdirSync(path.dirname(file), { recursive: true });
